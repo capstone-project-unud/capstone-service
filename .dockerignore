@@ -1,0 +1,7 @@
+.git
+.env*
+.cache
+.air
+data
+bin
+*.exe
