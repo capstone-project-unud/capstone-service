@@ -31,7 +31,7 @@ func (s *Server) ownedFile(ctx context.Context, db querier, id, owner, requiredM
 	return nil
 }
 func (s *Server) upload(c fiber.Ctx) error {
-	if e := require(c, "MAHASISWA"); e != nil {
+	if e := require(c, "MAHASISWA", "ADMIN", "KOORDINATOR_TA"); e != nil {
 		return e
 	}
 	f, e := c.FormFile("file")
@@ -87,8 +87,38 @@ func (s *Server) download(c fiber.Ctx) error {
 	u := actor(c)
 	allowed := owner == u.ID
 	if !allowed {
+		hasSchema, e := hasSemproSchema(c.Context(), s.DB)
+		if e != nil {
+			return e
+		}
+		hasFull, e := hasFullSOPSchema(c.Context(), s.DB)
+		if e != nil {
+			return e
+		}
 		var related bool
-		e := s.DB.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.projects p WHERE p.description_file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students d WHERE d.project_id=p.id AND d.student_id=$3))) OR EXISTS(SELECT 1 FROM capstone_service.proposal_applications a WHERE (a.simak_file_id=$1 OR a.approval_file_id=$1) AND (a.student_id=$3 OR $4 OR EXISTS(SELECT 1 FROM capstone_service.project_students d WHERE d.project_id=a.project_id AND d.student_id=a.student_id AND d.supervisor_id=$3)))`, id, u.Staff(), u.ID, u.Has("TU", "KOORDINATOR_TA", "ADMIN")).Scan(&related)
+		fileQuery := `
+			SELECT EXISTS(SELECT 1 FROM capstone_service.projects p WHERE p.description_file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students d WHERE d.project_id=p.id AND d.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.proposal_applications a WHERE (a.simak_file_id=$1 OR a.approval_file_id=$1) AND (a.student_id=$3 OR $4 OR EXISTS(SELECT 1 FROM capstone_service.project_students d WHERE d.project_id=a.project_id AND d.student_id=a.student_id AND d.supervisor_id=$3)))`
+		if hasSchema {
+			fileQuery += `
+			    OR EXISTS(SELECT 1 FROM capstone_service.project_documents d WHERE d.file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=d.project_id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.proposal_seminars s WHERE s.revision_file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=s.project_id AND m.student_id=$3)))`
+		}
+		if hasFull {
+			fileQuery += `
+			    OR EXISTS(SELECT 1 FROM capstone_service.project_document_versions v JOIN capstone_service.project_documents d ON d.id=v.document_id WHERE v.file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=d.project_id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.projects p WHERE p.assignment_letter_file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=p.id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.proposal_seminars s WHERE (s.minutes_file_id=$1 OR s.revision_approved_file_id=$1) AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=s.project_id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.seminar_revision_items r WHERE r.response_file_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=r.project_id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.final_exam_applications fa WHERE ($1 IN (fa.transcript_file_id, fa.spp_file_id, fa.ijazah_file_id, fa.photo_file_id, fa.pa_letter_file_id, fa.plagiarism_file_id)) AND (fa.student_id=$3 OR $4 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fa.project_id AND m.student_id=fa.student_id AND m.supervisor_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.final_exams fe WHERE ($1 IN (fe.minutes_file_id, fe.revision_approved_file_id)) AND ($2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fe.project_id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.expo_submissions ex WHERE ex.poster_file_id=$1 AND (ex.status='PUBLISHED' OR $4 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ex.project_id AND m.student_id=$3)))
+			    OR EXISTS(SELECT 1 FROM capstone_service.knowledge_sources ks WHERE ks.source_file_id=$1 AND (ks.status='ACTIVE' OR $4))`
+		}
+		if revisionSchema(c.Context(), s.DB) == nil {
+			fileQuery += ` OR EXISTS(SELECT 1 FROM capstone_service.proposal_documents pd JOIN capstone_service.proposal_applications a ON a.id=pd.application_id WHERE pd.file_id=$1 AND (a.student_id=$3 OR $2))`
+		}
+		e = s.DB.QueryRow(c.Context(), fileQuery, id, u.Staff(), u.ID, u.Has("TU", "KOORDINATOR_TA", "ADMIN")).Scan(&related)
 		if e != nil {
 			return e
 		}

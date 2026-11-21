@@ -26,47 +26,63 @@ func (u User) Has(roles ...string) bool {
 	}
 	return false
 }
-func (u User) Staff() bool { return u.Has("ADMIN", "DOSEN", "KOORDINATOR_TA", "TU") }
+func (u User) Staff() bool { return u.Has("ADMIN", "DOSEN", "KOORDINATOR_TA", "TU", "KOPRODI") }
 
 type Project struct {
-	ID                string        `json:"id"`
-	OwnerID           string        `json:"owner_id"`
-	Title             string        `json:"title"`
-	Summary           string        `json:"summary"`
-	InterestID        string        `json:"interest_id"`
-	InterestName      string        `json:"interest_name"`
-	DescriptionFileID *string       `json:"description_file_id"`
-	SignedDescription bool          `json:"signed_description"`
-	Status            string        `json:"status"`
-	RevisionNote      string        `json:"revision_note"`
-	Version           int           `json:"version"`
-	FinalizedAt       *time.Time    `json:"finalized_at"`
-	UpdatedAt         time.Time     `json:"updated_at"`
-	Students          []Participant `json:"students"`
+	ID                       string        `json:"id"`
+	GroupID                  *string       `json:"group_id"`
+	PeriodID                 *string       `json:"academic_period_id"`
+	PeriodName               string        `json:"academic_period_name"`
+	OwnerID                  string        `json:"owner_id"`
+	Title                    string        `json:"title"`
+	Summary                  string        `json:"summary"`
+	InterestID               string        `json:"interest_id"`
+	InterestName             string        `json:"interest_name"`
+	DescriptionFileID        *string       `json:"description_file_id"`
+	SignedDescription        bool          `json:"signed_description"`
+	Status                   string        `json:"status"`
+	RevisionNote             string        `json:"revision_note"`
+	TopicVerifyStatus        string        `json:"topic_verify_status"`
+	TopicVerifyNote          string        `json:"topic_verify_note"`
+	TopicVerifiedAt          *time.Time    `json:"topic_verified_at"`
+	AssignmentLetterFileID   *string       `json:"assignment_letter_file_id"`
+	AssignmentLetterNumber   string        `json:"assignment_letter_number"`
+	AssignmentLetterIssuedAt *string       `json:"assignment_letter_issued_at"`
+	Version                  int           `json:"version"`
+	FinalizedAt              *time.Time    `json:"finalized_at"`
+	UpdatedAt                time.Time     `json:"updated_at"`
+	Students                 []Participant `json:"students"`
 }
 type Participant struct {
-	StudentID          string     `json:"student_id"`
-	StudentName        string     `json:"student_name"`
-	NIM                string     `json:"nim"`
-	Slot               int        `json:"slot"`
-	CandidateID        *string    `json:"candidate_id"`
-	CandidateName      string     `json:"candidate_name"`
-	SupervisorID       *string    `json:"supervisor_id"`
-	SupervisorName     string     `json:"supervisor_name"`
-	TitleStatus        string     `json:"title_status"`
-	ConfirmationStatus string     `json:"confirmation_status"`
-	Note               string     `json:"note"`
-	TitleActor         *string    `json:"title_actor"`
-	TitleAt            *time.Time `json:"title_at"`
-	ConfirmationActor  *string    `json:"confirmation_actor"`
-	ConfirmationAt     *time.Time `json:"confirmation_at"`
+	StudentID            string     `json:"student_id"`
+	StudentName          string     `json:"student_name"`
+	NIM                  string     `json:"nim"`
+	IsLeader             bool       `json:"is_leader"`
+	Responsibility       string     `json:"responsibility"`
+	Slot                 int        `json:"slot"`
+	CandidateID          *string    `json:"candidate_id"`
+	CandidateName        string     `json:"candidate_name"`
+	SupervisorID         *string    `json:"supervisor_id"`
+	SupervisorName       string     `json:"supervisor_name"`
+	IsExternalSupervisor bool       `json:"is_external_supervisor"`
+	TitleStatus          string     `json:"title_status"`
+	ConfirmationStatus   string     `json:"confirmation_status"`
+	Note                 string     `json:"note"`
+	TitleActor           *string    `json:"title_actor"`
+	TitleAt              *time.Time `json:"title_at"`
+	ConfirmationActor    *string    `json:"confirmation_actor"`
+	ConfirmationAt       *time.Time `json:"confirmation_at"`
 }
 type MemberInput struct {
-	StudentID  string  `json:"student_id"`
-	Candidate1 *string `json:"candidate_1"`
-	Candidate2 *string `json:"candidate_2"`
+	StudentID      string  `json:"student_id"`
+	IsLeader       bool    `json:"is_leader"`
+	Responsibility string  `json:"responsibility"`
+	Candidate1     *string `json:"candidate_1"`
+	Candidate2     *string `json:"candidate_2"`
 }
 type ProjectInput struct {
+	GroupID           *string       `json:"group_id"`
+	PeriodID          *string       `json:"academic_period_id"`
 	Title             string        `json:"title"`
 	Summary           string        `json:"summary"`
 	InterestID        string        `json:"interest_id"`
@@ -85,7 +101,7 @@ func Text(v string, min, max int) bool {
 func (in *ProjectInput) Validate(owner string) error {
 	in.Title = strings.TrimSpace(in.Title)
 	in.Summary = strings.TrimSpace(in.Summary)
-	if !Text(in.Title, 5, 500) || !Text(in.Summary, 10, 10000) || !ValidID(in.InterestID) || !ValidOptional(in.DescriptionFileID) {
+	if !Text(in.Title, 5, 500) || !Text(in.Summary, 10, 10000) || !ValidID(in.InterestID) || !ValidOptional(in.DescriptionFileID) || !ValidOptional(in.GroupID) || !ValidOptional(in.PeriodID) {
 		return fmt.Errorf("Judul 5–500 karakter, deskripsi 10–10000 karakter, dan bidang minat wajib diisi.")
 	}
 	if len(in.Members) < 2 || len(in.Members) > 5 {

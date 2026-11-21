@@ -2,74 +2,181 @@ package httpapi
 
 import (
 	"capstone/capstone-service/internal/domain"
-	"fmt"
+	"capstone/capstone-service/internal/reports"
+	"context"
+	"encoding/json"
+	"errors"
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"time"
 )
 
+type ProposalDocument struct {
+	Kind       string     `json:"kind"`
+	FileID     string     `json:"file_id"`
+	Status     string     `json:"status"`
+	Note       string     `json:"note"`
+	Reviewer   *string    `json:"reviewer"`
+	ReviewedAt *time.Time `json:"reviewed_at"`
+}
 type Proposal struct {
-	ID                 string     `json:"id"`
-	ProjectID          string     `json:"project_id"`
-	Title              string     `json:"title"`
-	StudentID          string     `json:"student_id"`
-	StudentName        string     `json:"student_name"`
-	NIM                string     `json:"nim"`
-	SimakFileID        string     `json:"simak_file_id"`
-	ApprovalFileID     string     `json:"approval_file_id"`
-	SimakStatus        string     `json:"simak_status"`
-	ApprovalStatus     string     `json:"approval_status"`
-	SimakNote          string     `json:"simak_note"`
-	ApprovalNote       string     `json:"approval_note"`
-	SimakReviewer      *string    `json:"simak_reviewer"`
-	ApprovalReviewer   *string    `json:"approval_reviewer"`
-	SimakReviewedAt    *time.Time `json:"simak_reviewed_at"`
-	ApprovalReviewedAt *time.Time `json:"approval_reviewed_at"`
-	Version            int        `json:"version"`
-	SubmittedAt        time.Time  `json:"submitted_at"`
-	Ready              bool       `json:"ready"`
+	ID             string             `json:"id"`
+	ProjectID      string             `json:"project_id"`
+	Title          string             `json:"title"`
+	InterestID     string             `json:"interest_id"`
+	InterestName   string             `json:"interest_name"`
+	StudentID      string             `json:"student_id"`
+	StudentName    string             `json:"student_name"`
+	NIM            string             `json:"nim"`
+	Supervisor1    string             `json:"supervisor_1_name"`
+	Supervisor2    string             `json:"supervisor_2_name"`
+	SimakFileID    string             `json:"simak_file_id"`
+	ApprovalFileID string             `json:"approval_file_id"`
+	SimakStatus    string             `json:"simak_status"`
+	ApprovalStatus string             `json:"approval_status"`
+	Documents      []ProposalDocument `json:"documents"`
+	Version        int                `json:"version"`
+	SubmittedAt    time.Time          `json:"submitted_at"`
+	Ready          bool               `json:"ready"`
 }
 
-func (s *Server) listProposals(c fiber.Ctx) error {
-	u := actor(c)
-	if !u.Has("MAHASISWA", "TU", "ADMIN", "KOORDINATOR_TA") {
-		return fiber.ErrForbidden
-	}
-	rows, e := s.DB.Query(c.Context(), `SELECT a.id,a.project_id,p.title,a.student_id,m.student_name,m.nim,a.simak_file_id,a.approval_file_id,a.simak_status,a.approval_status,a.simak_note,a.approval_note,a.simak_reviewer,a.approval_reviewer,a.simak_reviewed_at,a.approval_reviewed_at,a.version,a.submitted_at FROM capstone_service.proposal_applications a JOIN capstone_service.projects p ON p.id=a.project_id JOIN capstone_service.project_students m ON m.project_id=a.project_id AND m.student_id=a.student_id AND m.slot=1 WHERE ($1 OR a.student_id=$2) ORDER BY a.submitted_at DESC LIMIT 1001`, u.Has("TU", "ADMIN", "KOORDINATOR_TA"), u.ID)
-	if e != nil {
+func revisionSchema(ctx context.Context, db querier) error {
+	var ok bool
+	if e := db.QueryRow(ctx, `SELECT to_regclass('capstone_service.proposal_exams') IS NOT NULL`).Scan(&ok); e != nil {
 		return e
+	}
+	if !ok {
+		return fiber.NewError(503, "Pendaftaran dan ujian proposal belum tersedia. Hubungi administrator.")
+	}
+	return nil
+}
+func loadProposals(ctx context.Context, db querier, u domain.User, interest, validity string) ([]Proposal, error) {
+	if interest != "" && !domain.ValidID(interest) {
+		return nil, fiber.ErrBadRequest
+	}
+	if validity != "" && validity != "ready" && validity != "pending" && validity != "revision" {
+		return nil, fiber.ErrBadRequest
+	}
+	rows, e := db.Query(ctx, `SELECT a.id,a.project_id,p.title,p.interest_id,i.name,a.student_id,m.student_name,m.nim,
+ coalesce(m.supervisor_name,''),coalesce(m2.supervisor_name,''),a.simak_file_id,a.approval_file_id,a.simak_status,a.approval_status,a.version,a.submitted_at,
+ coalesce((SELECT jsonb_agg(jsonb_build_object('kind',d.kind,'file_id',d.file_id,'status',d.status,'note',d.note,'reviewer',d.reviewer,'reviewed_at',d.reviewed_at) ORDER BY d.kind) FROM capstone_service.proposal_documents d WHERE d.application_id=a.id),'[]'::jsonb)
+ FROM capstone_service.proposal_applications a JOIN capstone_service.projects p ON p.id=a.project_id JOIN capstone_service.interest_fields i ON i.id=p.interest_id
+ JOIN capstone_service.project_students m ON m.project_id=a.project_id AND m.student_id=a.student_id AND m.slot=1
+ LEFT JOIN capstone_service.project_students m2 ON m2.project_id=a.project_id AND m2.student_id=a.student_id AND m2.slot=2
+ WHERE ($1 OR a.student_id=$2) AND ($3='' OR p.interest_id::text=$3) ORDER BY a.submitted_at DESC LIMIT 10001`, u.Staff(), u.ID, interest)
+	if e != nil {
+		return nil, e
 	}
 	defer rows.Close()
 	items := []Proposal{}
+	count := 0
 	for rows.Next() {
+		count++
 		var a Proposal
-		if e = rows.Scan(&a.ID, &a.ProjectID, &a.Title, &a.StudentID, &a.StudentName, &a.NIM, &a.SimakFileID, &a.ApprovalFileID, &a.SimakStatus, &a.ApprovalStatus, &a.SimakNote, &a.ApprovalNote, &a.SimakReviewer, &a.ApprovalReviewer, &a.SimakReviewedAt, &a.ApprovalReviewedAt, &a.Version, &a.SubmittedAt); e != nil {
-			return e
+		var raw []byte
+		if e = rows.Scan(&a.ID, &a.ProjectID, &a.Title, &a.InterestID, &a.InterestName, &a.StudentID, &a.StudentName, &a.NIM, &a.Supervisor1, &a.Supervisor2, &a.SimakFileID, &a.ApprovalFileID, &a.SimakStatus, &a.ApprovalStatus, &a.Version, &a.SubmittedAt, &raw); e != nil {
+			return nil, e
 		}
-		a.Ready = a.SimakStatus == "VALID" && a.ApprovalStatus == "VALID"
+		if e = json.Unmarshal(raw, &a.Documents); e != nil {
+			return nil, e
+		}
+		a.Ready = len(a.Documents) == 6
+		revision := false
+		for _, d := range a.Documents {
+			a.Ready = a.Ready && d.Status == "VALID"
+			revision = revision || d.Status == "REVISION"
+		}
+		if validity == "ready" && !a.Ready || validity == "pending" && a.Ready || validity == "revision" && !revision {
+			continue
+		}
 		items = append(items, a)
 	}
 	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	if count > 10000 {
+		return nil, fiber.NewError(422, "Persempit bidang minat untuk mengunduh maksimal 10000 pendaftaran.")
+	}
+	return items, nil
+}
+func (s *Server) listProposals(c fiber.Ctx) error {
+	if !actor(c).Has("MAHASISWA", "DOSEN", "TU", "ADMIN", "KOORDINATOR_TA", "KOPRODI") {
+		return fiber.ErrForbidden
+	}
+	if e := revisionSchema(c.Context(), s.DB); e != nil {
 		return e
 	}
-	if len(items) > 1000 {
-		return fiber.NewError(422, "Daftar melebihi 1000 pendaftaran.")
+	items, e := loadProposals(c.Context(), s.DB, actor(c), c.Query("interest_id"), c.Query("validity"))
+	if e != nil {
+		return e
 	}
 	return c.JSON(fiber.Map{"items": items})
+}
+func (s *Server) exportProposals(c fiber.Ctx) error {
+	if !actor(c).Staff() {
+		return fiber.ErrForbidden
+	}
+	if e := revisionSchema(c.Context(), s.DB); e != nil {
+		return e
+	}
+	items, e := loadProposals(c.Context(), s.DB, actor(c), c.Query("interest_id"), c.Query("validity"))
+	if e != nil {
+		return e
+	}
+	rows := [][]string{{"NIM", "Nama", "Judul", "P1", "P2", "Bidang minat", "Status kelengkapan", "SIMAK", "Persetujuan pembimbing", "Bahasa Inggris", "Proposal", "B100", "B200"}}
+	for _, a := range items {
+		status := "Belum valid"
+		if a.Ready {
+			status = "Valid"
+		}
+		row := []string{a.NIM, a.StudentName, a.Title, a.Supervisor1, a.Supervisor2, a.InterestName, status}
+		for _, k := range domain.ProposalKinds {
+			v := "MISSING"
+			for _, d := range a.Documents {
+				if d.Kind == k {
+					v = d.Status
+				}
+			}
+			row = append(row, v)
+		}
+		rows = append(rows, row)
+	}
+	b, e := reports.XLSX(rows)
+	if e != nil {
+		return e
+	}
+	c.Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Set("Content-Disposition", `attachment; filename="pendaftaran-proposal.xlsx"`)
+	return c.Send(b)
 }
 func (s *Server) saveProposal(c fiber.Ctx) error {
 	if e := require(c, "MAHASISWA"); e != nil {
 		return e
 	}
-	var in struct {
-		ProjectID      string `json:"project_id"`
-		SimakFileID    string `json:"simak_file_id"`
-		ApprovalFileID string `json:"approval_file_id"`
-		Version        int    `json:"version"`
+	if e := revisionSchema(c.Context(), s.DB); e != nil {
+		return e
 	}
-	if c.Bind().JSON(&in) != nil || !domain.ValidID(in.ProjectID) || !domain.ValidID(in.SimakFileID) || !domain.ValidID(in.ApprovalFileID) || in.SimakFileID == in.ApprovalFileID {
-		return fiber.NewError(422, "Unggah bukti SIMAK dan surat persetujuan sebagai dua berkas berbeda.")
+	var in struct {
+		ProjectID string `json:"project_id"`
+		Simak     string `json:"simak_file_id"`
+		Approval  string `json:"approval_file_id"`
+		English   string `json:"english_file_id"`
+		Proposal  string `json:"proposal_file_id"`
+		B100      string `json:"b100_file_id"`
+		B200      string `json:"b200_file_id"`
+		Version   int    `json:"version"`
+	}
+	if c.Bind().JSON(&in) != nil || !domain.ValidID(in.ProjectID) {
+		return fiber.ErrUnprocessableEntity
+	}
+	ids := []string{in.Simak, in.Approval, in.English, in.Proposal, in.B100, in.B200}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if !domain.ValidID(id) || seen[id] {
+			return fiber.NewError(422, "Enam berkas persyaratan yang berbeda wajib diunggah.")
+		}
+		seen[id] = true
 	}
 	tx, e := s.DB.Begin(c.Context())
 	if e != nil {
@@ -80,54 +187,65 @@ func (s *Server) saveProposal(c fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
-	if !canRead(actor(c), p) || p.Status != "FINALIZED" {
-		return fiber.NewError(422, "Judul Anda belum ditetapkan.")
-	}
 	supervisors := 0
-	for _, r := range p.Students {
-		if r.StudentID == actor(c).ID && r.SupervisorID != nil {
+	for _, m := range p.Students {
+		if m.StudentID == actor(c).ID && m.SupervisorID != nil {
 			supervisors++
 		}
 	}
-	if supervisors != 2 {
-		return fiber.NewError(422, "Dua pembimbing perlu ditetapkan sebelum mendaftar UP.")
+	if p.Status != "FINALIZED" || supervisors != 2 {
+		return fiber.NewError(422, "Judul dan dua pembimbing Anda harus ditetapkan sebelum mendaftar.")
 	}
-	for _, id := range []string{in.SimakFileID, in.ApprovalFileID} {
-		if e = s.ownedFile(c.Context(), tx, id, actor(c).ID, ""); e != nil {
+	for i, id := range ids {
+		mime := "application/pdf"
+		if i == 0 || i == 2 {
+			mime = ""
+		}
+		if e = s.ownedFile(c.Context(), tx, id, actor(c).ID, mime); e != nil {
 			return e
 		}
-	}
-	if e = s.ownedFile(c.Context(), tx, in.ApprovalFileID, actor(c).ID, "application/pdf"); e != nil {
-		return e
 	}
 	id := uuid.NewString()
-	var existing Proposal
-	e = tx.QueryRow(c.Context(), "SELECT id,version,simak_status,approval_status,simak_file_id,approval_file_id FROM capstone_service.proposal_applications WHERE student_id=$1 FOR UPDATE", actor(c).ID).Scan(&existing.ID, &existing.Version, &existing.SimakStatus, &existing.ApprovalStatus, &existing.SimakFileID, &existing.ApprovalFileID)
-	if e != nil && e != pgx.ErrNoRows {
+	version := 0
+	e = tx.QueryRow(c.Context(), `SELECT id,version FROM capstone_service.proposal_applications WHERE project_id=$1 AND student_id=$2 FOR UPDATE`, p.ID, actor(c).ID).Scan(&id, &version)
+	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return e
 	}
-	if e == nil {
-		if e = stale(existing.Version, in.Version); e != nil {
+	exists := e == nil
+	if exists {
+		if e = stale(version, in.Version); e != nil {
 			return e
 		}
-		if existing.SimakStatus == "VALID" && existing.ApprovalStatus == "VALID" {
-			return fiber.NewError(409, "Kedua berkas sudah divalidasi TU.")
+		if e = unrecordedProposal(c.Context(), tx, id); e != nil {
+			return e
 		}
-		id = existing.ID
-		if existing.SimakFileID == in.SimakFileID && existing.ApprovalFileID == in.ApprovalFileID {
-			return fiber.NewError(422, "Unggah perbaikan berkas sebelum mengajukan ulang.")
-		}
-		_, e = tx.Exec(c.Context(), `UPDATE capstone_service.proposal_applications SET simak_file_id=$2,approval_file_id=$3,
- simak_status=CASE WHEN simak_file_id=$2 THEN simak_status ELSE 'PENDING' END,approval_status=CASE WHEN approval_file_id=$3 THEN approval_status ELSE 'PENDING' END,
- simak_note=CASE WHEN simak_file_id=$2 THEN simak_note ELSE '' END,approval_note=CASE WHEN approval_file_id=$3 THEN approval_note ELSE '' END,
- simak_reviewer=CASE WHEN simak_file_id=$2 THEN simak_reviewer END,approval_reviewer=CASE WHEN approval_file_id=$3 THEN approval_reviewer END,
- simak_reviewed_at=CASE WHEN simak_file_id=$2 THEN simak_reviewed_at END,approval_reviewed_at=CASE WHEN approval_file_id=$3 THEN approval_reviewed_at END,
- version=version+1,submitted_at=now() WHERE id=$1`, id, in.SimakFileID, in.ApprovalFileID)
+		_, e = tx.Exec(c.Context(), `UPDATE capstone_service.proposal_applications SET simak_file_id=$2,approval_file_id=$3,version=version+1,submitted_at=now() WHERE id=$1`, id, in.Simak, in.Approval)
 	} else {
-		_, e = tx.Exec(c.Context(), "INSERT INTO capstone_service.proposal_applications(id,project_id,student_id,simak_file_id,approval_file_id) VALUES($1,$2,$3,$4,$5)", id, p.ID, actor(c).ID, in.SimakFileID, in.ApprovalFileID)
+		if in.Version != 0 {
+			return fiber.ErrConflict
+		}
+		_, e = tx.Exec(c.Context(), `INSERT INTO capstone_service.proposal_applications(id,project_id,student_id,simak_file_id,approval_file_id) VALUES($1,$2,$3,$4,$5)`, id, p.ID, actor(c).ID, in.Simak, in.Approval)
 	}
 	if e != nil {
 		return e
+	}
+	changed := int64(0)
+	for i, k := range domain.ProposalKinds {
+		tag, err := tx.Exec(c.Context(), `INSERT INTO capstone_service.proposal_documents(application_id,kind,file_id) VALUES($1,$2,$3)
+ ON CONFLICT(application_id,kind) DO UPDATE SET file_id=excluded.file_id,status='PENDING',note='',reviewer=NULL,reviewed_at=NULL WHERE proposal_documents.file_id<>excluded.file_id`, id, k, ids[i])
+		if err != nil {
+			return err
+		}
+		changed += tag.RowsAffected()
+	}
+	if changed == 0 {
+		return fiber.NewError(422, "Unggah berkas perbaikan sebelum mengajukan ulang.")
+	}
+	for _, k := range []string{"simak", "approval"} {
+		_, e = tx.Exec(c.Context(), `UPDATE capstone_service.proposal_applications a SET `+k+`_status=d.status,`+k+`_note=d.note,`+k+`_reviewer=d.reviewer,`+k+`_reviewed_at=d.reviewed_at FROM capstone_service.proposal_documents d WHERE a.id=$1 AND d.application_id=a.id AND d.kind=$2`, id, k)
+		if e != nil {
+			return e
+		}
 	}
 	if e = audit(c.Context(), tx, actor(c), p.ID, "PROPOSAL_SUBMITTED", in); e != nil {
 		return e
@@ -137,8 +255,21 @@ func (s *Server) saveProposal(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"id": id})
 }
+func unrecordedProposal(ctx context.Context, db querier, id string) error {
+	var used bool
+	if e := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM capstone_service.proposal_exams WHERE application_id=$1)`, id).Scan(&used); e != nil {
+		return e
+	}
+	if used {
+		return fiber.NewError(409, "Berkas terkunci karena informasi ujian telah dicatat.")
+	}
+	return nil
+}
 func (s *Server) reviewProposal(c fiber.Ctx) error {
 	if e := require(c, "TU"); e != nil {
+		return e
+	}
+	if e := revisionSchema(c.Context(), s.DB); e != nil {
 		return e
 	}
 	if !domain.ValidID(c.Params("id")) {
@@ -150,7 +281,7 @@ func (s *Server) reviewProposal(c fiber.Ctx) error {
 		Status  string `json:"status"`
 		Note    string `json:"note"`
 	}
-	if c.Bind().JSON(&in) != nil || (in.Kind != "simak" && in.Kind != "approval") || (in.Status != "VALID" && in.Status != "REVISION") || !domain.Text(in.Note, 0, 2000) || (in.Status == "REVISION" && !domain.Text(in.Note, 5, 2000)) {
+	if c.Bind().JSON(&in) != nil || !domain.ProposalKind(in.Kind) || (in.Status != "VALID" && in.Status != "REVISION") || !domain.Text(in.Note, 0, 2000) || (in.Status == "REVISION" && !domain.Text(in.Note, 5, 2000)) {
 		return fiber.NewError(422, "Keputusan dan catatan pemeriksaan tidak valid.")
 	}
 	tx, e := s.DB.Begin(c.Context())
@@ -160,17 +291,34 @@ func (s *Server) reviewProposal(c fiber.Ctx) error {
 	defer tx.Rollback(c.Context())
 	var project string
 	var version int
-	if e = tx.QueryRow(c.Context(), "SELECT project_id,version FROM capstone_service.proposal_applications WHERE id=$1 FOR UPDATE", c.Params("id")).Scan(&project, &version); e != nil {
+	if e = tx.QueryRow(c.Context(), `SELECT project_id,version FROM capstone_service.proposal_applications WHERE id=$1 FOR UPDATE`, c.Params("id")).Scan(&project, &version); e != nil {
 		return e
 	}
 	if e = stale(version, in.Version); e != nil {
 		return e
 	}
-	_, e = tx.Exec(c.Context(), fmt.Sprintf("UPDATE capstone_service.proposal_applications SET %s_status=$2,%s_note=$3,%s_reviewer=$4,%s_reviewed_at=now(),version=version+1 WHERE id=$1", in.Kind, in.Kind, in.Kind, in.Kind), c.Params("id"), in.Status, in.Note, actor(c).ID)
+	if e = unrecordedProposal(c.Context(), tx, c.Params("id")); e != nil {
+		return e
+	}
+	tag, e := tx.Exec(c.Context(), `UPDATE capstone_service.proposal_documents SET status=$3,note=$4,reviewer=$5,reviewed_at=now() WHERE application_id=$1 AND kind=$2`, c.Params("id"), in.Kind, in.Status, in.Note, actor(c).ID)
 	if e != nil {
 		return e
 	}
-	if e = audit(c.Context(), tx, actor(c), project, "PROPOSAL_FILE_REVIEWED", map[string]any{"id": c.Params("id"), "input": in}); e != nil {
+	if tag.RowsAffected() != 1 {
+		return fiber.NewError(422, "Berkas belum diunggah.")
+	}
+	_, e = tx.Exec(c.Context(), `UPDATE capstone_service.proposal_applications SET version=version+1 WHERE id=$1`, c.Params("id"))
+	if e != nil {
+		return e
+	}
+	if in.Kind == "simak" || in.Kind == "approval" {
+		k := in.Kind
+		_, e = tx.Exec(c.Context(), `UPDATE capstone_service.proposal_applications SET `+k+`_status=$2,`+k+`_note=$3,`+k+`_reviewer=$4,`+k+`_reviewed_at=now() WHERE id=$1`, c.Params("id"), in.Status, in.Note, actor(c).ID)
+		if e != nil {
+			return e
+		}
+	}
+	if e = audit(c.Context(), tx, actor(c), project, "PROPOSAL_FILE_REVIEWED", in); e != nil {
 		return e
 	}
 	if e = tx.Commit(c.Context()); e != nil {

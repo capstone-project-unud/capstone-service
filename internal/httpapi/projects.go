@@ -23,18 +23,51 @@ func loadProject(ctx context.Context, db querier, id string, lock bool) (domain.
 	if lock {
 		suffix = " FOR UPDATE OF p"
 	}
-	e := db.QueryRow(ctx, `SELECT p.id,p.owner_id,p.title,p.summary,p.interest_id,i.name,p.description_file_id,p.signed_description,p.status,p.revision_note,p.version,p.finalized_at,p.updated_at FROM capstone_service.projects p JOIN capstone_service.interest_fields i ON i.id=p.interest_id WHERE p.id=$1`+suffix, id).Scan(&p.ID, &p.OwnerID, &p.Title, &p.Summary, &p.InterestID, &p.InterestName, &p.DescriptionFileID, &p.SignedDescription, &p.Status, &p.RevisionNote, &p.Version, &p.FinalizedAt, &p.UpdatedAt)
+	full, e := hasFullSOPSchema(ctx, db)
 	if e != nil {
 		return p, e
 	}
-	rows, e := db.Query(ctx, `SELECT student_id,student_name,nim,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at FROM capstone_service.project_students WHERE project_id=$1 ORDER BY nim,slot`, id)
+	if full {
+		e = db.QueryRow(ctx, `
+			SELECT p.id,p.group_id,p.academic_period_id,coalesce(ap.name,''),p.owner_id,p.title,p.summary,p.interest_id,i.name,
+			       p.description_file_id,p.signed_description,p.status,p.revision_note,p.topic_verify_status,p.topic_verify_note,
+			       p.topic_verified_at,p.assignment_letter_file_id,p.assignment_letter_number,
+			       CASE WHEN p.assignment_letter_issued_at IS NULL THEN NULL ELSE p.assignment_letter_issued_at::text END,
+			       p.version,p.finalized_at,p.updated_at
+			FROM capstone_service.projects p
+			JOIN capstone_service.interest_fields i ON i.id=p.interest_id
+			LEFT JOIN capstone_service.academic_periods ap ON ap.id=p.academic_period_id
+			WHERE p.id=$1`+suffix, id).Scan(
+			&p.ID, &p.GroupID, &p.PeriodID, &p.PeriodName, &p.OwnerID, &p.Title, &p.Summary, &p.InterestID, &p.InterestName,
+			&p.DescriptionFileID, &p.SignedDescription, &p.Status, &p.RevisionNote, &p.TopicVerifyStatus, &p.TopicVerifyNote,
+			&p.TopicVerifiedAt, &p.AssignmentLetterFileID, &p.AssignmentLetterNumber, &p.AssignmentLetterIssuedAt,
+			&p.Version, &p.FinalizedAt, &p.UpdatedAt,
+		)
+	} else {
+		p.TopicVerifyStatus = "PENDING"
+		e = db.QueryRow(ctx, `SELECT p.id,p.owner_id,p.title,p.summary,p.interest_id,i.name,p.description_file_id,p.signed_description,p.status,p.revision_note,p.version,p.finalized_at,p.updated_at FROM capstone_service.projects p JOIN capstone_service.interest_fields i ON i.id=p.interest_id WHERE p.id=$1`+suffix, id).Scan(&p.ID, &p.OwnerID, &p.Title, &p.Summary, &p.InterestID, &p.InterestName, &p.DescriptionFileID, &p.SignedDescription, &p.Status, &p.RevisionNote, &p.Version, &p.FinalizedAt, &p.UpdatedAt)
+	}
+	if e != nil {
+		return p, e
+	}
+	studentCols := `student_id,student_name,nim,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
+	if full {
+		studentCols = `student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,is_external_supervisor,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
+	}
+	rows, e := db.Query(ctx, `SELECT `+studentCols+` FROM capstone_service.project_students WHERE project_id=$1 ORDER BY nim,slot`, id)
 	if e != nil {
 		return p, e
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r domain.Participant
-		if e = rows.Scan(&r.StudentID, &r.StudentName, &r.NIM, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt); e != nil {
+		if full {
+			e = rows.Scan(&r.StudentID, &r.StudentName, &r.NIM, &r.IsLeader, &r.Responsibility, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.IsExternalSupervisor, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
+		} else {
+			e = rows.Scan(&r.StudentID, &r.StudentName, &r.NIM, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
+			r.IsLeader = r.StudentID == p.OwnerID
+		}
+		if e != nil {
 			return p, e
 		}
 		p.Students = append(p.Students, r)
@@ -134,9 +167,7 @@ func (s *Server) listProjects(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"items": items, "total": total, "limit": 20})
 }
-func (s *Server) createProject(c fiber.Ctx) error { return s.writeProject(c, true) }
-func (s *Server) updateProject(c fiber.Ctx) error { return s.writeProject(c, false) }
-func (s *Server) writeProject(c fiber.Ctx, create bool) error {
+func (s *Server) createProject(c fiber.Ctx) error {
 	if e := require(c, "MAHASISWA"); e != nil {
 		return e
 	}
@@ -147,6 +178,25 @@ func (s *Server) writeProject(c fiber.Ctx, create bool) error {
 	if e := in.Validate(actor(c).ID); e != nil {
 		return fiber.NewError(422, e.Error())
 	}
+	return s.persistNewProject(c, in)
+}
+func (s *Server) updateProject(c fiber.Ctx) error {
+	if e := require(c, "MAHASISWA"); e != nil {
+		return e
+	}
+	var in domain.ProjectInput
+	if c.Bind().JSON(&in) != nil {
+		return fiber.ErrUnprocessableEntity
+	}
+	if e := in.Validate(actor(c).ID); e != nil {
+		return fiber.NewError(422, e.Error())
+	}
+	return s.persistProject(c, false, in)
+}
+func (s *Server) persistNewProject(c fiber.Ctx, in domain.ProjectInput) error {
+	return s.persistProject(c, true, in)
+}
+func (s *Server) persistProject(c fiber.Ctx, create bool, in domain.ProjectInput) error {
 	id := c.Params("id")
 	if create {
 		id = uuid.NewString()
@@ -159,6 +209,10 @@ func (s *Server) writeProject(c fiber.Ctx, create bool) error {
 	}
 	defer tx.Rollback(c.Context())
 	ctx := c.Context()
+	full, e := hasFullSOPSchema(ctx, tx)
+	if e != nil {
+		return e
+	}
 	if !create {
 		p, e := loadProject(ctx, tx, id, true)
 		if e != nil {
@@ -173,6 +227,9 @@ func (s *Server) writeProject(c fiber.Ctx, create bool) error {
 		if p.Status != "DRAFT" && p.Status != "REVISION" {
 			return fiber.NewError(409, "Judul sedang ditinjau atau sudah final. Koordinator perlu meminta revisi sebelum diubah.")
 		}
+		if p.PeriodID != nil && in.PeriodID == nil {
+			in.PeriodID = p.PeriodID
+		}
 	}
 	var active bool
 	if e = tx.QueryRow(ctx, "SELECT is_active FROM capstone_service.interest_fields WHERE id=$1", in.InterestID).Scan(&active); e != nil {
@@ -186,8 +243,39 @@ func (s *Server) writeProject(c fiber.Ctx, create bool) error {
 			return e
 		}
 	}
+	var resolvedGroupID *string
+	var resolvedPeriodID *string
+	if full {
+		resolvedPeriodID = in.PeriodID
+		if resolvedPeriodID == nil {
+			var pid string
+			if err := tx.QueryRow(ctx, `SELECT id FROM capstone_service.academic_periods ORDER BY is_active DESC, start_date DESC LIMIT 1`).Scan(&pid); err == nil {
+				resolvedPeriodID = &pid
+			}
+		}
+		if create {
+			if in.GroupID != nil {
+				resolvedGroupID = in.GroupID
+				if _, e = tx.Exec(ctx, `UPDATE capstone_service.capstone_groups SET status='LOCKED',version=version+1,updated_at=now() WHERE id=$1`, *resolvedGroupID); e != nil {
+					return e
+				}
+			} else if resolvedPeriodID != nil {
+				gid := uuid.NewString()
+				resolvedGroupID = &gid
+				if _, e = tx.Exec(ctx, `INSERT INTO capstone_service.capstone_groups(id,code,academic_period_id,interest_id,working_title,initial_description,leader_id,status) VALUES($1,$2,$3,$4,$5,$6,$7,'LOCKED')`,
+					gid, generateGroupCode(), *resolvedPeriodID, in.InterestID, in.Title, in.Summary, actor(c).ID); e != nil {
+					return e
+				}
+			}
+		}
+	}
 	if create {
-		_, e = tx.Exec(ctx, `INSERT INTO capstone_service.projects(id,owner_id,title,summary,interest_id,description_file_id,signed_description) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, actor(c).ID, in.Title, in.Summary, in.InterestID, in.DescriptionFileID, in.SignedDescription)
+		if full {
+			_, e = tx.Exec(ctx, `INSERT INTO capstone_service.projects(id,group_id,academic_period_id,owner_id,title,summary,interest_id,description_file_id,signed_description) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				id, resolvedGroupID, resolvedPeriodID, actor(c).ID, in.Title, in.Summary, in.InterestID, in.DescriptionFileID, in.SignedDescription)
+		} else {
+			_, e = tx.Exec(ctx, `INSERT INTO capstone_service.projects(id,owner_id,title,summary,interest_id,description_file_id,signed_description) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, actor(c).ID, in.Title, in.Summary, in.InterestID, in.DescriptionFileID, in.SignedDescription)
+		}
 	} else {
 		_, e = tx.Exec(ctx, `UPDATE capstone_service.projects SET title=$2,summary=$3,interest_id=$4,description_file_id=$5,signed_description=$6,version=version+1,updated_at=now(),status='DRAFT' WHERE id=$1`, id, in.Title, in.Summary, in.InterestID, in.DescriptionFileID, in.SignedDescription)
 		if e == nil {
@@ -197,10 +285,35 @@ func (s *Server) writeProject(c fiber.Ctx, create bool) error {
 	if e != nil {
 		return e
 	}
+	hasExplicitLeader := false
+	for _, m := range in.Members {
+		if m.IsLeader {
+			hasExplicitLeader = true
+			break
+		}
+	}
 	for _, m := range in.Members {
 		student, e := s.identity(ctx, m.StudentID, "MAHASISWA")
 		if e != nil {
 			return e
+		}
+		isLeader := m.IsLeader
+		if !hasExplicitLeader {
+			isLeader = m.StudentID == actor(c).ID
+		}
+		resp := strings.TrimSpace(m.Responsibility)
+		if resp == "" {
+			if isLeader {
+				resp = "Ketua Kelompok"
+			} else {
+				resp = "Anggota Tim"
+			}
+		}
+		if full && create && in.GroupID == nil && resolvedGroupID != nil {
+			if _, e = tx.Exec(ctx, `INSERT INTO capstone_service.capstone_group_members(group_id,student_id,student_name,nim,is_leader,responsibility) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (group_id,student_id) DO NOTHING`,
+				*resolvedGroupID, student.ID, student.FullName, student.NIM, isLeader, resp); e != nil {
+				return e
+			}
 		}
 		for i, candidate := range []*string{m.Candidate1, m.Candidate2} {
 			name := ""
@@ -211,7 +324,13 @@ func (s *Server) writeProject(c fiber.Ctx, create bool) error {
 				}
 				name = u.FullName
 			}
-			if _, e = tx.Exec(ctx, `INSERT INTO capstone_service.project_students(project_id,student_id,student_name,nim,slot,candidate_id,candidate_name) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, student.ID, student.FullName, student.NIM, i+1, candidate, name); e != nil {
+			if full {
+				_, e = tx.Exec(ctx, `INSERT INTO capstone_service.project_students(project_id,academic_period_id,student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+					id, resolvedPeriodID, student.ID, student.FullName, student.NIM, isLeader, resp, i+1, candidate, name)
+			} else {
+				_, e = tx.Exec(ctx, `INSERT INTO capstone_service.project_students(project_id,student_id,student_name,nim,slot,candidate_id,candidate_name) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, student.ID, student.FullName, student.NIM, i+1, candidate, name)
+			}
+			if e != nil {
 				return e
 			}
 		}

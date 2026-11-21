@@ -88,9 +88,95 @@ func New(db *pgxpool.Pool, files storage.Store) *fiber.App {
 	api.Post("/guidance", s.saveGuidance)
 	api.Put("/guidance/:id", s.saveGuidance)
 	api.Put("/guidance/:id/review", s.reviewGuidance)
+	api.Get("/proposals/export", s.exportProposals)
 	api.Get("/proposals", s.listProposals)
 	api.Post("/proposals", s.saveProposal)
 	api.Put("/proposals/:id/review", s.reviewProposal)
+	api.Get("/proposal-exams", s.listProposalExams)
+	api.Post("/proposal-exams", s.recordProposalExam)
+	api.Put("/proposal-exams/:id/evaluation", s.evaluateProposalExam)
+	api.Post("/proposal-exams/:id/attendance", s.attendProposalExam)
+	api.Get("/proposal-exams/:id/report", s.proposalExamReport)
+	api.Get("/proposal-grading-policy", s.proposalPolicy)
+	api.Post("/proposal-grading-policy", s.saveProposalPolicy)
+	api.Get("/signature", s.getSignature)
+	api.Get("/signature/preview", s.previewSignature)
+	api.Post("/signature", s.saveSignature)
+	api.Get("/documents", s.listDocuments)
+	api.Post("/documents", s.saveDocument)
+	api.Put("/documents/:id/review", s.reviewDocument)
+	api.Get("/sempro", s.listSempro)
+	api.Post("/sempro", func(c fiber.Ctx) error {
+		return fiber.NewError(410, "Jadwal ditentukan di luar sistem. Mahasiswa mencatat informasi ujian melalui /proposal-exams.")
+	})
+	api.Put("/sempro/:id/evaluate", s.evaluateSempro)
+	api.Post("/sempro/:id/decision", s.decideSempro)
+	api.Post("/sempro/:id/revision", s.submitSemproRevision)
+	api.Post("/sempro/:id/revision-approval", s.attachSemproRevisionApproval)
+	api.Get("/sempro/:id/report", s.semproReport)
+	api.Post("/projects/:id/sempro-approval", s.saveSemproApproval)
+	api.Post("/projects/:id/verify-topic", s.verifyTopicAdmin)
+	api.Put("/projects/:id/assignment-letter", s.saveAssignmentLetter)
+
+	// SOP-004 Master Data Akademik
+	api.Get("/master/periods", s.listPeriods)
+	api.Post("/master/periods", s.savePeriod)
+	api.Put("/master/periods/:id", s.savePeriod)
+	api.Get("/master/document-types", s.listDocumentTypes)
+	api.Post("/master/document-types", s.saveDocumentType)
+	api.Put("/master/document-types/:code", s.saveDocumentType)
+	api.Get("/master/stage-requirements", s.listStageRequirements)
+	api.Put("/master/stage-requirements/:stage", s.updateStageRequirement)
+	api.Get("/master/rubrics", s.listRubrics)
+	api.Put("/master/rubrics/:id", s.updateRubricItem)
+
+	// SOP-005 Kelompok Capstone Project
+	api.Get("/groups", s.listGroups)
+	api.Post("/groups", s.saveGroup)
+	api.Put("/groups/:id", s.saveGroup)
+	api.Post("/groups/:id/topic", s.createTopicFromGroup)
+
+	// SOP-008 Seminar Kelayakan Topik
+	api.Get("/topic-seminars", s.listTopicSeminars)
+	api.Post("/topic-seminars", s.registerTopicSeminar)
+	api.Put("/topic-seminars/:id/schedule", s.scheduleTopicSeminar)
+	api.Put("/topic-seminars/:id/evaluate", s.evaluateTopicSeminar)
+	api.Post("/topic-seminars/:id/decision", s.decideTopicSeminar)
+
+	// SOP-014 & SOP-017 Revisi Penguji Terstruktur
+	api.Post("/revisions", s.createRevisionItem)
+	api.Put("/revisions/:id/respond", s.respondRevisionItem)
+	api.Put("/revisions/:id/review", s.reviewRevisionItem)
+
+	// SOP-015..017 Ujian Akhir
+	api.Get("/final-exam", s.listFinalExam)
+	api.Post("/final-exam/applications", s.saveFinalExamApp)
+	api.Put("/final-exam/applications/:id/tu-review", s.reviewFinalExamAppTU)
+	api.Put("/final-exam/applications/:id/advisor-review", s.reviewFinalExamAppAdvisor)
+	api.Put("/final-exam/applications/:id/coordinator-review", s.reviewFinalExamAppCoordinator)
+	api.Post("/final-exam/schedule", s.scheduleFinalExam)
+	api.Put("/final-exam/:id/evaluate", s.evaluateFinalExam)
+	api.Post("/final-exam/:id/decision", s.decideFinalExam)
+	api.Post("/final-exam/:id/revision-approval", s.attachFinalExamRevisionApproval)
+	api.Get("/final-exam/:id/report", s.finalExamReport)
+
+	// SOP-018 Capstone Expo
+	api.Get("/expo", s.listExpo)
+	api.Post("/expo", s.saveExpo)
+	api.Put("/expo/:id/review", s.reviewExpo)
+
+	// SOP-019 Asisten Pedoman RAG
+	api.Get("/assistant/sources", s.listKnowledgeSources)
+	api.Post("/assistant/sources", s.saveKnowledgeSource)
+	api.Post("/assistant/sources/:id/index", s.indexKnowledgeSource)
+	api.Post("/assistant/sources/:id/test", s.testKnowledgeSource)
+	api.Post("/assistant/sources/:id/activate", s.activateKnowledgeSource)
+	api.Get("/assistant/sessions", s.listChatSessions)
+	api.Post("/assistant/chat", s.askAssistant)
+
+	// SOP-020 Monitoring & Pelaporan
+	api.Get("/monitoring/report", s.monitoringReport)
+	api.Get("/monitoring/export", s.exportMonitoring)
 	return app
 }
 func (s *Server) remote(ctx context.Context, method, base, path, token string, data any, out any) error {
@@ -185,7 +271,11 @@ func audit(ctx context.Context, tx pgx.Tx, u domain.User, projectID, action stri
 	if e != nil {
 		return e
 	}
-	_, e = tx.Exec(ctx, "INSERT INTO capstone_service.audit_logs(actor_id,project_id,action,detail) VALUES($1,$2,$3,$4)", u.ID, projectID, action, b)
+	var pid *string
+	if projectID != "" {
+		pid = &projectID
+	}
+	_, e = tx.Exec(ctx, "INSERT INTO capstone_service.audit_logs(actor_id,project_id,action,detail) VALUES($1,$2,$3,$4)", u.ID, pid, action, b)
 	return e
 }
 func stale(actual, want int) error {
