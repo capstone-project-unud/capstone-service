@@ -150,15 +150,89 @@ func (s *Server) projectList(c fiber.Ctx, all bool) ([]domain.Project, int, erro
 	if e != nil {
 		return nil, 0, e
 	}
-	items := []domain.Project{}
-	for _, id := range ids {
-		p, e := loadProject(c.Context(), s.DB, id, false)
+	if len(ids) == 0 {
+		return []domain.Project{}, total, nil
+	}
+	full, e := hasFullSOPSchema(c.Context(), s.DB)
+	if e != nil {
+		return nil, 0, e
+	}
+	items := make([]domain.Project, 0, len(ids))
+	byID := make(map[string]int, len(ids))
+	var pQuery string
+	if full {
+		pQuery = `
+			SELECT p.id,p.group_id,p.academic_period_id,coalesce(ap.name,''),p.owner_id,p.title,p.summary,p.interest_id,i.name,
+			       p.description_file_id,p.signed_description,p.status,p.revision_note,p.topic_verify_status,p.topic_verify_note,
+			       p.topic_verified_at,p.assignment_letter_file_id,p.assignment_letter_number,
+			       CASE WHEN p.assignment_letter_issued_at IS NULL THEN NULL ELSE p.assignment_letter_issued_at::text END,
+			       p.version,p.finalized_at,p.updated_at
+			FROM capstone_service.projects p
+			JOIN capstone_service.interest_fields i ON i.id=p.interest_id
+			LEFT JOIN capstone_service.academic_periods ap ON ap.id=p.academic_period_id
+			WHERE p.id = ANY($1::uuid[])
+			ORDER BY p.updated_at DESC, p.id`
+	} else {
+		pQuery = `SELECT p.id,p.owner_id,p.title,p.summary,p.interest_id,i.name,p.description_file_id,p.signed_description,p.status,p.revision_note,p.version,p.finalized_at,p.updated_at FROM capstone_service.projects p JOIN capstone_service.interest_fields i ON i.id=p.interest_id WHERE p.id = ANY($1::uuid[]) ORDER BY p.updated_at DESC, p.id`
+	}
+	pRows, e := s.DB.Query(c.Context(), pQuery, ids)
+	if e != nil {
+		return nil, 0, e
+	}
+	for pRows.Next() {
+		var p domain.Project
+		p.Students = []domain.Participant{}
+		if full {
+			e = pRows.Scan(
+				&p.ID, &p.GroupID, &p.PeriodID, &p.PeriodName, &p.OwnerID, &p.Title, &p.Summary, &p.InterestID, &p.InterestName,
+				&p.DescriptionFileID, &p.SignedDescription, &p.Status, &p.RevisionNote, &p.TopicVerifyStatus, &p.TopicVerifyNote,
+				&p.TopicVerifiedAt, &p.AssignmentLetterFileID, &p.AssignmentLetterNumber, &p.AssignmentLetterIssuedAt,
+				&p.Version, &p.FinalizedAt, &p.UpdatedAt,
+			)
+		} else {
+			p.TopicVerifyStatus = "PENDING"
+			e = pRows.Scan(&p.ID, &p.OwnerID, &p.Title, &p.Summary, &p.InterestID, &p.InterestName, &p.DescriptionFileID, &p.SignedDescription, &p.Status, &p.RevisionNote, &p.Version, &p.FinalizedAt, &p.UpdatedAt)
+		}
+		if e != nil {
+			pRows.Close()
+			return nil, 0, e
+		}
+		byID[p.ID] = len(items)
+		items = append(items, p)
+	}
+	e = pRows.Err()
+	pRows.Close()
+	if e != nil {
+		return nil, 0, e
+	}
+	studentCols := `project_id,student_id,student_name,nim,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
+	if full {
+		studentCols = `project_id,student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,is_external_supervisor,external_supervisor_name,external_supervisor_institution,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
+	}
+	sRows, e := s.DB.Query(c.Context(), `SELECT `+studentCols+` FROM capstone_service.project_students WHERE project_id = ANY($1::uuid[]) ORDER BY project_id, nim, slot`, ids)
+	if e != nil {
+		return nil, 0, e
+	}
+	defer sRows.Close()
+	for sRows.Next() {
+		var pid string
+		var r domain.Participant
+		if full {
+			e = sRows.Scan(&pid, &r.StudentID, &r.StudentName, &r.NIM, &r.IsLeader, &r.Responsibility, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.IsExternalSupervisor, &r.ExternalSupervisorName, &r.ExternalSupervisorInstitution, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
+		} else {
+			e = sRows.Scan(&pid, &r.StudentID, &r.StudentName, &r.NIM, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
+		}
 		if e != nil {
 			return nil, 0, e
 		}
-		items = append(items, p)
+		if idx, ok := byID[pid]; ok {
+			if !full {
+				r.IsLeader = r.StudentID == items[idx].OwnerID
+			}
+			items[idx].Students = append(items[idx].Students, r)
+		}
 	}
-	return items, total, nil
+	return items, total, sRows.Err()
 }
 func (s *Server) listProjects(c fiber.Ctx) error {
 	items, total, e := s.projectList(c, false)

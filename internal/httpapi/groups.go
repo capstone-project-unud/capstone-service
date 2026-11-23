@@ -114,13 +114,88 @@ func (s *Server) listGroups(c fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
-	items := []domain.CapstoneGroup{}
-	for _, id := range ids {
-		g, e := loadGroup(c.Context(), s.DB, id)
+	if len(ids) == 0 {
+		return c.JSON(fiber.Map{"items": []domain.CapstoneGroup{}})
+	}
+	items := make([]domain.CapstoneGroup, 0, len(ids))
+	byID := make(map[string]int, len(ids))
+	projToGroup := make(map[string]int, len(ids))
+	gRows, e := s.DB.Query(c.Context(), `
+		SELECT g.id,g.code,g.academic_period_id,ap.name,g.interest_id,i.name,g.working_title,g.initial_description,
+		       g.leader_id,coalesce((SELECT m.student_name FROM capstone_service.capstone_group_members m WHERE m.group_id=g.id AND m.student_id=g.leader_id LIMIT 1),''),
+		       g.status,p.id,coalesce(p.title,''),coalesce(p.status,''),g.version,g.updated_at
+		FROM capstone_service.capstone_groups g
+		JOIN capstone_service.academic_periods ap ON ap.id=g.academic_period_id
+		JOIN capstone_service.interest_fields i ON i.id=g.interest_id
+		LEFT JOIN capstone_service.projects p ON p.group_id=g.id
+		WHERE g.id = ANY($1::uuid[])
+		ORDER BY g.updated_at DESC`, ids)
+	if e != nil {
+		return e
+	}
+	projIDs := make([]string, 0, len(ids))
+	for gRows.Next() {
+		var g domain.CapstoneGroup
+		g.Members = []domain.GroupMember{}
+		g.Advisors = []domain.GroupAdvisorBrief{}
+		if e = gRows.Scan(&g.ID, &g.Code, &g.AcademicPeriodID, &g.AcademicPeriodName, &g.InterestID, &g.InterestName, &g.WorkingTitle, &g.InitialDescription, &g.LeaderID, &g.LeaderName, &g.Status, &g.ProjectID, &g.ProjectTitle, &g.ProjectStatus, &g.Version, &g.UpdatedAt); e != nil {
+			gRows.Close()
+			return e
+		}
+		idx := len(items)
+		byID[g.ID] = idx
+		if g.ProjectID != nil {
+			projIDs = append(projIDs, *g.ProjectID)
+			projToGroup[*g.ProjectID] = idx
+		}
+		items = append(items, g)
+	}
+	e = gRows.Err()
+	gRows.Close()
+	if e != nil {
+		return e
+	}
+	mRows, e := s.DB.Query(c.Context(), `SELECT group_id,student_id,student_name,nim,is_leader,responsibility,joined_at FROM capstone_service.capstone_group_members WHERE group_id = ANY($1::uuid[]) ORDER BY group_id, is_leader DESC, nim ASC`, ids)
+	if e != nil {
+		return e
+	}
+	for mRows.Next() {
+		var gid string
+		var m domain.GroupMember
+		if e = mRows.Scan(&gid, &m.StudentID, &m.StudentName, &m.NIM, &m.IsLeader, &m.Responsibility, &m.JoinedAt); e != nil {
+			mRows.Close()
+			return e
+		}
+		if idx, ok := byID[gid]; ok {
+			items[idx].Members = append(items[idx].Members, m)
+		}
+	}
+	e = mRows.Err()
+	mRows.Close()
+	if e != nil {
+		return e
+	}
+	if len(projIDs) > 0 {
+		aRows, e := s.DB.Query(c.Context(), `SELECT project_id,student_id,student_name,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,is_external_supervisor,external_supervisor_name,external_supervisor_institution,title_status,confirmation_status FROM capstone_service.project_students WHERE project_id = ANY($1::uuid[]) ORDER BY project_id, nim, slot`, projIDs)
 		if e != nil {
 			return e
 		}
-		items = append(items, g)
+		for aRows.Next() {
+			var pid string
+			var ab domain.GroupAdvisorBrief
+			if e = aRows.Scan(&pid, &ab.StudentID, &ab.StudentName, &ab.Slot, &ab.CandidateID, &ab.CandidateName, &ab.SupervisorID, &ab.SupervisorName, &ab.IsExternalSupervisor, &ab.ExternalSupervisorName, &ab.ExternalSupervisorInstitution, &ab.TitleStatus, &ab.ConfirmationStatus); e != nil {
+				aRows.Close()
+				return e
+			}
+			if idx, ok := projToGroup[pid]; ok {
+				items[idx].Advisors = append(items[idx].Advisors, ab)
+			}
+		}
+		e = aRows.Err()
+		aRows.Close()
+		if e != nil {
+			return e
+		}
 	}
 	return c.JSON(fiber.Map{"items": items})
 }

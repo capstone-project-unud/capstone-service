@@ -2,19 +2,40 @@ package httpapi
 
 import (
 	"context"
+	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func hasSemproSchema(ctx context.Context, db querier) (bool, error) {
+type schemaCacheKey struct {
+	pool *pgxpool.Pool
+	name string
+}
+
+var verifiedSchemas sync.Map
+
+func checkSchemaCached(ctx context.Context, db querier, name, query string) (bool, error) {
+	pool, isPool := db.(*pgxpool.Pool)
+	if isPool {
+		if v, ok := verifiedSchemas.Load(schemaCacheKey{pool: pool, name: name}); ok && v.(bool) {
+			return true, nil
+		}
+	}
 	var ok bool
-	e := db.QueryRow(ctx, `SELECT to_regclass('capstone_service.project_documents') IS NOT NULL AND to_regclass('capstone_service.proposal_seminars') IS NOT NULL AND to_regclass('capstone_service.seminar_evaluations') IS NOT NULL`).Scan(&ok)
+	e := db.QueryRow(ctx, query).Scan(&ok)
+	if e == nil && ok && isPool {
+		verifiedSchemas.Store(schemaCacheKey{pool: pool, name: name}, true)
+	}
 	return ok, e
 }
 
+func hasSemproSchema(ctx context.Context, db querier) (bool, error) {
+	return checkSchemaCached(ctx, db, "sempro", `SELECT to_regclass('capstone_service.project_documents') IS NOT NULL AND to_regclass('capstone_service.proposal_seminars') IS NOT NULL AND to_regclass('capstone_service.seminar_evaluations') IS NOT NULL`)
+}
+
 func hasFullSOPSchema(ctx context.Context, db querier) (bool, error) {
-	var ok bool
-	e := db.QueryRow(ctx, `SELECT to_regclass('capstone_service.academic_periods') IS NOT NULL AND to_regclass('capstone_service.capstone_groups') IS NOT NULL AND to_regclass('capstone_service.final_exams') IS NOT NULL AND to_regclass('capstone_service.expo_submissions') IS NOT NULL AND to_regclass('capstone_service.knowledge_sources') IS NOT NULL`).Scan(&ok)
-	return ok, e
+	return checkSchemaCached(ctx, db, "full_sop", `SELECT to_regclass('capstone_service.academic_periods') IS NOT NULL AND to_regclass('capstone_service.capstone_groups') IS NOT NULL AND to_regclass('capstone_service.final_exams') IS NOT NULL AND to_regclass('capstone_service.expo_submissions') IS NOT NULL AND to_regclass('capstone_service.knowledge_sources') IS NOT NULL`)
 }
 
 func scheduleConflict(ctx context.Context, db querier, table, excludeProjectID string, at time.Time, location string, examiners []string) (string, error) {

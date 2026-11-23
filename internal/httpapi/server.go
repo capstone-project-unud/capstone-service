@@ -29,7 +29,8 @@ type Server struct {
 }
 
 func New(db *pgxpool.Pool, files storage.Store) *fiber.App {
-	s := &Server{db, files, &http.Client{Timeout: 10 * time.Second}, strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/"), strings.TrimRight(os.Getenv("USER_SERVICE_URL"), "/"), os.Getenv("AUTH_INTERNAL_TOKEN"), os.Getenv("USER_INTERNAL_TOKEN")}
+	transport := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 32, IdleConnTimeout: 90 * time.Second}
+	s := &Server{db, files, &http.Client{Timeout: 10 * time.Second, Transport: transport}, strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/"), strings.TrimRight(os.Getenv("USER_SERVICE_URL"), "/"), os.Getenv("AUTH_INTERNAL_TOKEN"), os.Getenv("USER_INTERNAL_TOKEN")}
 	app := fiber.New(fiber.Config{AppName: "capstone-service", BodyLimit: storage.MaxFile + 65536, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, ErrorHandler: func(c fiber.Ctx, e error) error {
 		code, msg := 500, "Layanan capstone mengalami gangguan."
 		var fe *fiber.Error

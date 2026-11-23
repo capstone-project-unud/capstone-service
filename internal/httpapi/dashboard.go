@@ -75,45 +75,77 @@ func (s *Server) dashboard(c fiber.Ctx) error {
 		return fiber.ErrForbidden
 	}
 	global := u.Has("ADMIN", "KOORDINATOR_TA", "TU", "KOPRODI")
-	var hasSemproTables bool
-	if err := s.DB.QueryRow(c.Context(), `SELECT to_regclass('capstone_service.project_documents') IS NOT NULL AND to_regclass('capstone_service.proposal_seminars') IS NOT NULL`).Scan(&hasSemproTables); err != nil {
+	hasSemproTables, err := hasSemproSchema(c.Context(), s.DB)
+	if err != nil {
 		return err
 	}
+	hasRev := revisionSchema(c.Context(), s.DB) == nil
 	var stats dashboardStats
 	projectFilter := `($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=p.id AND (m.student_id=$2 OR m.candidate_id=$2 OR m.supervisor_id=$2)))`
 	if hasSemproTables {
 		projectFilter = `($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=p.id AND (m.student_id=$2 OR m.candidate_id=$2 OR m.supervisor_id=$2)) OR EXISTS(SELECT 1 FROM capstone_service.proposal_seminars s WHERE s.project_id=p.id AND (s.examiner_1_id=$2 OR s.examiner_2_id=$2 OR s.examiner_3_id=$2)))`
 	}
-	if revisionSchema(c.Context(), s.DB) == nil {
+	if hasRev {
 		projectFilter = "(" + projectFilter + ` OR EXISTS(SELECT 1 FROM capstone_service.proposal_exams e JOIN capstone_service.proposal_applications a ON a.id=e.application_id WHERE a.project_id=p.id AND e.panel @> jsonb_build_array(jsonb_build_object('id',$2::text))))`
 	}
-	where := ` FROM capstone_service.projects p WHERE ` + projectFilter
-	err := s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE p.status='DRAFT'),count(*) FILTER(WHERE p.status='SUBMITTED'),count(*) FILTER(WHERE p.status='REVISION'),count(*) FILTER(WHERE p.status='FINALIZED')`+where, global, u.ID).Scan(&stats.Projects, &stats.Draft, &stats.Submitted, &stats.Revision, &stats.Finalized)
+	err = s.DB.QueryRow(c.Context(), `
+		SELECT
+			(SELECT count(*) FROM capstone_service.projects p WHERE `+projectFilter+`),
+			(SELECT count(*) FROM capstone_service.projects p WHERE (`+projectFilter+`) AND p.status='DRAFT'),
+			(SELECT count(*) FROM capstone_service.projects p WHERE (`+projectFilter+`) AND p.status='SUBMITTED'),
+			(SELECT count(*) FROM capstone_service.projects p WHERE (`+projectFilter+`) AND p.status='REVISION'),
+			(SELECT count(*) FROM capstone_service.projects p WHERE (`+projectFilter+`) AND p.status='FINALIZED'),
+			ps.students, ps.supervised, ps.title_pending, ps.conf_pending,
+			CASE WHEN $3 THEN 0 ELSE gl.total END, CASE WHEN $3 THEN 0 ELSE gl.approved END, CASE WHEN $3 THEN 0 ELSE gl.pending END, CASE WHEN $3 THEN 0 ELSE gl.revision END,
+			CASE WHEN $4 THEN 0 ELSE pa.total END, CASE WHEN $4 THEN 0 ELSE pa.ready END, CASE WHEN $4 THEN 0 ELSE pa.simak_p END, CASE WHEN $4 THEN 0 ELSE pa.simak_v END, CASE WHEN $4 THEN 0 ELSE pa.simak_r END, CASE WHEN $4 THEN 0 ELSE pa.app_p END, CASE WHEN $4 THEN 0 ELSE pa.app_v END, CASE WHEN $4 THEN 0 ELSE pa.app_r END
+		FROM (
+			SELECT count(DISTINCT m.student_id) students,
+				count(DISTINCT m.student_id) FILTER(WHERE m.supervisor_id=$2) supervised,
+				count(*) FILTER(WHERE p.status='SUBMITTED' AND m.title_status='PENDING' AND coalesce(m.supervisor_id,m.candidate_id) IS NOT NULL) title_pending,
+				count(*) FILTER(WHERE p.status='SUBMITTED' AND m.confirmation_status='PENDING' AND coalesce(m.supervisor_id,m.candidate_id) IS NOT NULL) conf_pending
+			FROM capstone_service.project_students m JOIN capstone_service.projects p ON p.id=m.project_id
+			WHERE ($1 OR m.student_id=$2 OR coalesce(m.supervisor_id,m.candidate_id)=$2)
+		) ps,
+		(
+			SELECT count(*) total,
+				count(*) FILTER(WHERE l.status='APPROVED') approved,
+				count(*) FILTER(WHERE l.status='PENDING' AND ($5 OR l.student_id=$2 OR l.supervisor_id=$2)) pending,
+				count(*) FILTER(WHERE l.status='REVISION') revision
+			FROM capstone_service.guidance_logs l
+			WHERE ($5 OR l.student_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=l.project_id AND m.student_id=l.student_id AND m.supervisor_id=$2))
+		) gl,
+		(
+			SELECT count(*) total,
+				count(*) FILTER(WHERE simak_status='VALID' AND approval_status='VALID') ready,
+				count(*) FILTER(WHERE simak_status='PENDING') simak_p,
+				count(*) FILTER(WHERE simak_status='VALID') simak_v,
+				count(*) FILTER(WHERE simak_status='REVISION') simak_r,
+				count(*) FILTER(WHERE approval_status='PENDING') app_p,
+				count(*) FILTER(WHERE approval_status='VALID') app_v,
+				count(*) FILTER(WHERE approval_status='REVISION') app_r
+			FROM capstone_service.proposal_applications WHERE ($1 OR student_id=$2)
+		) pa`,
+		global, u.ID, scope == "tu", scope == "lecturer", u.Has("ADMIN", "KOORDINATOR_TA"),
+	).Scan(
+		&stats.Projects, &stats.Draft, &stats.Submitted, &stats.Revision, &stats.Finalized,
+		&stats.Students, &stats.SupervisedStudents, &stats.TitlePending, &stats.ConfirmationPending,
+		&stats.Guidance, &stats.GuidanceApproved, &stats.GuidancePending, &stats.GuidanceRevision,
+		&stats.Proposals, &stats.ProposalReady, &stats.SimakPending, &stats.SimakValid, &stats.SimakRevision, &stats.ApprovalPending, &stats.ApprovalValid, &stats.ApprovalRevision,
+	)
 	if err != nil {
 		return err
-	}
-	err = s.DB.QueryRow(c.Context(), `SELECT count(DISTINCT m.student_id),count(DISTINCT m.student_id) FILTER(WHERE m.supervisor_id=$2),count(*) FILTER(WHERE p.status='SUBMITTED' AND m.title_status='PENDING' AND coalesce(m.supervisor_id,m.candidate_id) IS NOT NULL),count(*) FILTER(WHERE p.status='SUBMITTED' AND m.confirmation_status='PENDING' AND coalesce(m.supervisor_id,m.candidate_id) IS NOT NULL) FROM capstone_service.project_students m JOIN capstone_service.projects p ON p.id=m.project_id WHERE ($1 OR m.student_id=$2 OR coalesce(m.supervisor_id,m.candidate_id)=$2)`, global, u.ID).Scan(&stats.Students, &stats.SupervisedStudents, &stats.TitlePending, &stats.ConfirmationPending)
-	if err != nil {
-		return err
-	}
-	if scope != "tu" {
-		err = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE l.status='APPROVED'),count(*) FILTER(WHERE l.status='PENDING' AND ($2 OR l.student_id=$1 OR l.supervisor_id=$1)),count(*) FILTER(WHERE l.status='REVISION') FROM capstone_service.guidance_logs l WHERE ($2 OR l.student_id=$1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=l.project_id AND m.student_id=l.student_id AND m.supervisor_id=$1))`, u.ID, u.Has("ADMIN", "KOORDINATOR_TA")).Scan(&stats.Guidance, &stats.GuidanceApproved, &stats.GuidancePending, &stats.GuidanceRevision)
-		if err != nil {
-			return err
-		}
-	}
-	if scope != "lecturer" {
-		err = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE simak_status='VALID' AND approval_status='VALID'),count(*) FILTER(WHERE simak_status='PENDING'),count(*) FILTER(WHERE simak_status='VALID'),count(*) FILTER(WHERE simak_status='REVISION'),count(*) FILTER(WHERE approval_status='PENDING'),count(*) FILTER(WHERE approval_status='VALID'),count(*) FILTER(WHERE approval_status='REVISION') FROM capstone_service.proposal_applications WHERE ($1 OR student_id=$2)`, global, u.ID).Scan(&stats.Proposals, &stats.ProposalReady, &stats.SimakPending, &stats.SimakValid, &stats.SimakRevision, &stats.ApprovalPending, &stats.ApprovalValid, &stats.ApprovalRevision)
-		if err != nil {
-			return err
-		}
 	}
 	if hasSemproTables {
-		err = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE status='PENDING'),count(*) FILTER(WHERE status='APPROVED'),count(*) FILTER(WHERE status='REVISION') FROM capstone_service.project_documents d WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=d.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))`, global, u.ID).Scan(&stats.DocumentsUploaded, &stats.DocumentsPending, &stats.DocumentsApproved, &stats.DocumentsRevision)
-		if err != nil {
-			return err
-		}
-		err = s.DB.QueryRow(c.Context(), `SELECT count(*) FILTER(WHERE s.status='SCHEDULED'),count(*) FILTER(WHERE s.status='REVISION'),count(*) FILTER(WHERE s.status='APPROVED'),count(*) FILTER(WHERE s.status='REJECTED') FROM capstone_service.proposal_seminars s WHERE ($1 OR s.examiner_1_id=$2 OR s.examiner_2_id=$2 OR s.examiner_3_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=s.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))`, global, u.ID).Scan(&stats.SemproScheduled, &stats.SemproRevision, &stats.SemproApproved, &stats.SemproRejected)
+		err = s.DB.QueryRow(c.Context(), `
+			SELECT pd.tot, pd.pend, pd.appr, pd.rev, sm.sched, sm.rev, sm.appr, sm.rej
+			FROM (
+				SELECT count(*) tot, count(*) FILTER(WHERE status='PENDING') pend, count(*) FILTER(WHERE status='APPROVED') appr, count(*) FILTER(WHERE status='REVISION') rev
+				FROM capstone_service.project_documents d WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=d.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))
+			) pd,
+			(
+				SELECT count(*) FILTER(WHERE s.status='SCHEDULED') sched, count(*) FILTER(WHERE s.status='REVISION') rev, count(*) FILTER(WHERE s.status='APPROVED') appr, count(*) FILTER(WHERE s.status='REJECTED') rej
+				FROM capstone_service.proposal_seminars s WHERE ($1 OR s.examiner_1_id=$2 OR s.examiner_2_id=$2 OR s.examiner_3_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=s.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))
+			) sm`, global, u.ID).Scan(&stats.DocumentsUploaded, &stats.DocumentsPending, &stats.DocumentsApproved, &stats.DocumentsRevision, &stats.SemproScheduled, &stats.SemproRevision, &stats.SemproApproved, &stats.SemproRejected)
 		if err != nil {
 			return err
 		}
@@ -123,19 +155,32 @@ func (s *Server) dashboard(c fiber.Ctx) error {
 		return err
 	}
 	if hasFull {
-		_ = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE status IN ('READY','LOCKED')) FROM capstone_service.capstone_groups g WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.capstone_group_members m WHERE m.group_id=g.id AND m.student_id=$2))`, global, u.ID).Scan(&stats.Groups, &stats.GroupsReady)
-		_ = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE status='LAYAK') FROM capstone_service.topic_seminars ts WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ts.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)) OR ts.panelist_1_id=$2 OR ts.panelist_2_id=$2)`, global, u.ID).Scan(&stats.TopicSeminars, &stats.TopicSeminarsLayak)
-		_ = s.DB.QueryRow(c.Context(), `SELECT count(*) FROM capstone_service.final_exam_applications fa WHERE ($1 OR fa.student_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fa.project_id AND m.supervisor_id=$2))`, global, u.ID).Scan(&stats.FinalExamApps)
-		_ = s.DB.QueryRow(c.Context(), `SELECT count(*) FILTER(WHERE fe.status IN ('SCHEDULED','REVISION')),count(*) FILTER(WHERE fe.status='PASSED') FROM capstone_service.final_exams fe WHERE ($1 OR fe.examiner_1_id=$2 OR fe.examiner_2_id=$2 OR fe.examiner_3_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fe.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))`, global, u.ID).Scan(&stats.FinalExamScheduled, &stats.FinalExamPassed)
-		_ = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE status='PUBLISHED') FROM capstone_service.expo_submissions ex WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ex.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))`, global, u.ID).Scan(&stats.ExpoSubmitted, &stats.ExpoPublished)
+		_ = s.DB.QueryRow(c.Context(), `
+			SELECT
+				(SELECT count(*) FROM capstone_service.capstone_groups g WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.capstone_group_members m WHERE m.group_id=g.id AND m.student_id=$2))),
+				(SELECT count(*) FROM capstone_service.capstone_groups g WHERE g.status IN ('READY','LOCKED') AND ($1 OR EXISTS(SELECT 1 FROM capstone_service.capstone_group_members m WHERE m.group_id=g.id AND m.student_id=$2))),
+				(SELECT count(*) FROM capstone_service.topic_seminars ts WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ts.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)) OR ts.panelist_1_id=$2 OR ts.panelist_2_id=$2)),
+				(SELECT count(*) FROM capstone_service.topic_seminars ts WHERE ts.status='LAYAK' AND ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ts.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)) OR ts.panelist_1_id=$2 OR ts.panelist_2_id=$2)),
+				(SELECT count(*) FROM capstone_service.final_exam_applications fa WHERE ($1 OR fa.student_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fa.project_id AND m.supervisor_id=$2))),
+				(SELECT count(*) FROM capstone_service.final_exams fe WHERE fe.status IN ('SCHEDULED','REVISION') AND ($1 OR fe.examiner_1_id=$2 OR fe.examiner_2_id=$2 OR fe.examiner_3_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fe.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))),
+				(SELECT count(*) FROM capstone_service.final_exams fe WHERE fe.status='PASSED' AND ($1 OR fe.examiner_1_id=$2 OR fe.examiner_2_id=$2 OR fe.examiner_3_id=$2 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=fe.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))),
+				(SELECT count(*) FROM capstone_service.expo_submissions ex WHERE ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ex.project_id AND (m.student_id=$2 OR m.supervisor_id=$2)))),
+				(SELECT count(*) FROM capstone_service.expo_submissions ex WHERE ex.status='PUBLISHED' AND ($1 OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=ex.project_id AND (m.student_id=$2 OR m.supervisor_id=$2))))`,
+			global, u.ID).Scan(&stats.Groups, &stats.GroupsReady, &stats.TopicSeminars, &stats.TopicSeminarsLayak, &stats.FinalExamApps, &stats.FinalExamScheduled, &stats.FinalExamPassed, &stats.ExpoSubmitted, &stats.ExpoPublished)
 	}
-	if revisionSchema(c.Context(), s.DB) == nil {
-		if err = s.DB.QueryRow(c.Context(), `SELECT count(*),count(*) FILTER(WHERE (SELECT count(*) FROM capstone_service.proposal_documents d WHERE d.application_id=a.id AND d.status='VALID')=6) FROM capstone_service.proposal_applications a WHERE ($1 OR a.student_id=$2)`, global || u.Has("DOSEN"), u.ID).Scan(&stats.Proposals, &stats.ProposalReady); err != nil {
-			return err
-		}
-		var individual dashboardStats
+	if hasRev {
 		member := fmt.Sprintf(`[{"id":%q}]`, u.ID)
-		if err = s.DB.QueryRow(c.Context(), `SELECT count(*) FILTER(WHERE n<5),count(*) FILTER(WHERE n=5 AND rejected=0 AND revised>0),count(*) FILTER(WHERE n=5 AND rejected=0 AND revised=0),count(*) FILTER(WHERE n=5 AND rejected>0) FROM (SELECT e.id,count(v.evaluator_id) n,count(*) FILTER(WHERE v.recommendation='REJECTED') rejected,count(*) FILTER(WHERE v.recommendation='REVISION') revised FROM capstone_service.proposal_exams e JOIN capstone_service.proposal_applications a ON a.id=e.application_id LEFT JOIN capstone_service.proposal_exam_evaluations v ON v.exam_id=e.id WHERE ($1 OR a.student_id=$2 OR e.panel @> $3::jsonb) GROUP BY e.id) x`, global, u.ID, member).Scan(&individual.SemproScheduled, &individual.SemproRevision, &individual.SemproApproved, &individual.SemproRejected); err != nil {
+		var individual dashboardStats
+		if err = s.DB.QueryRow(c.Context(), `
+			SELECT
+				(SELECT count(*) FROM capstone_service.proposal_applications a WHERE ($1 OR a.student_id=$2)),
+				(SELECT count(*) FROM capstone_service.proposal_applications a WHERE ($1 OR a.student_id=$2) AND (SELECT count(*) FROM capstone_service.proposal_documents d WHERE d.application_id=a.id AND d.status='VALID')=6),
+				count(*) FILTER(WHERE n<5),
+				count(*) FILTER(WHERE n=5 AND rejected=0 AND revised>0),
+				count(*) FILTER(WHERE n=5 AND rejected=0 AND revised=0),
+				count(*) FILTER(WHERE n=5 AND rejected>0)
+			FROM (SELECT e.id,count(v.evaluator_id) n,count(*) FILTER(WHERE v.recommendation='REJECTED') rejected,count(*) FILTER(WHERE v.recommendation='REVISION') revised FROM capstone_service.proposal_exams e JOIN capstone_service.proposal_applications a ON a.id=e.application_id LEFT JOIN capstone_service.proposal_exam_evaluations v ON v.exam_id=e.id WHERE ($3 OR a.student_id=$2 OR e.panel @> $4::jsonb) GROUP BY e.id) x`,
+			global || u.Has("DOSEN"), u.ID, global, member).Scan(&stats.Proposals, &stats.ProposalReady, &individual.SemproScheduled, &individual.SemproRevision, &individual.SemproApproved, &individual.SemproRejected); err != nil {
 			return err
 		}
 		if individual.SemproScheduled+individual.SemproRevision+individual.SemproApproved+individual.SemproRejected > 0 {

@@ -44,8 +44,8 @@ type Proposal struct {
 }
 
 func revisionSchema(ctx context.Context, db querier) error {
-	var ok bool
-	if e := db.QueryRow(ctx, `SELECT to_regclass('capstone_service.proposal_exams') IS NOT NULL`).Scan(&ok); e != nil {
+	ok, e := checkSchemaCached(ctx, db, "revision_exams", `SELECT to_regclass('capstone_service.proposal_exams') IS NOT NULL`)
+	if e != nil {
 		return e
 	}
 	if !ok {

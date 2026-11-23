@@ -121,12 +121,35 @@ func (s *Server) listDocuments(c fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
-	for i := range items {
-		versions, e := loadDocVersions(c.Context(), s.DB, items[i].ID)
+	if len(items) > 0 {
+		docIDs := make([]string, len(items))
+		byID := make(map[string]int, len(items))
+		for i := range items {
+			items[i].Versions = []domain.DocumentVersion{}
+			docIDs[i] = items[i].ID
+			byID[items[i].ID] = i
+		}
+		vRows, e := s.DB.Query(c.Context(), `
+			SELECT id,document_id,version_no,file_id,file_name,summary,uploaded_by,uploaded_by_name,review_status,review_note,reviewer_name,reviewed_at,created_at
+			FROM capstone_service.project_document_versions
+			WHERE document_id = ANY($1::uuid[])
+			ORDER BY document_id, version_no DESC`, docIDs)
 		if e != nil {
 			return e
 		}
-		items[i].Versions = versions
+		defer vRows.Close()
+		for vRows.Next() {
+			var v domain.DocumentVersion
+			if e = vRows.Scan(&v.ID, &v.DocumentID, &v.VersionNo, &v.FileID, &v.FileName, &v.Summary, &v.UploadedBy, &v.UploadedByName, &v.ReviewStatus, &v.ReviewNote, &v.ReviewerName, &v.ReviewedAt, &v.CreatedAt); e != nil {
+				return e
+			}
+			if idx, ok := byID[v.DocumentID]; ok {
+				items[idx].Versions = append(items[idx].Versions, v)
+			}
+		}
+		if e = vRows.Err(); e != nil {
+			return e
+		}
 	}
 	return c.JSON(fiber.Map{"items": items})
 }
