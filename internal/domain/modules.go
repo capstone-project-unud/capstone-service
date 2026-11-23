@@ -142,15 +142,18 @@ type GroupMember struct {
 }
 
 type GroupAdvisorBrief struct {
-	StudentID            string `json:"student_id"`
-	StudentName          string `json:"student_name"`
-	Slot                 int    `json:"slot"`
-	CandidateID          *string `json:"candidate_id"`
-	CandidateName        string `json:"candidate_name"`
-	SupervisorID         *string `json:"supervisor_id"`
-	SupervisorName       string `json:"supervisor_name"`
-	TitleStatus          string `json:"title_status"`
-	ConfirmationStatus   string `json:"confirmation_status"`
+	StudentID                     string  `json:"student_id"`
+	StudentName                   string  `json:"student_name"`
+	Slot                          int     `json:"slot"`
+	CandidateID                   *string `json:"candidate_id"`
+	CandidateName                 string  `json:"candidate_name"`
+	SupervisorID                  *string `json:"supervisor_id"`
+	SupervisorName                string  `json:"supervisor_name"`
+	IsExternalSupervisor          bool    `json:"is_external_supervisor"`
+	ExternalSupervisorName        string  `json:"external_supervisor_name"`
+	ExternalSupervisorInstitution string  `json:"external_supervisor_institution"`
+	TitleStatus                   string  `json:"title_status"`
+	ConfirmationStatus            string  `json:"confirmation_status"`
 }
 
 type CapstoneGroup struct {
@@ -315,27 +318,33 @@ type FinalExamApplication struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
+type FinalExamAttendance struct {
+	LecturerID  string    `json:"lecturer_id"`
+	ConfirmedAt time.Time `json:"confirmed_at"`
+}
+
 type FinalExam struct {
-	ID                     string               `json:"id"`
-	ProjectID              string               `json:"project_id"`
-	ScheduledAt            time.Time            `json:"scheduled_at"`
-	Location               string               `json:"location"`
-	Examiner1ID            string               `json:"examiner_1_id"`
-	Examiner1Name          string               `json:"examiner_1_name"`
-	Examiner2ID            string               `json:"examiner_2_id"`
-	Examiner2Name          string               `json:"examiner_2_name"`
-	Examiner3ID            string               `json:"examiner_3_id"`
-	Examiner3Name          string               `json:"examiner_3_name"`
-	Status                 string               `json:"status"`
-	OutcomeNote            string               `json:"outcome_note"`
-	MinutesFileID          *string              `json:"minutes_file_id"`
-	RevisionApprovedFileID *string              `json:"revision_approved_file_id"`
-	ScheduleHistory        []map[string]any     `json:"schedule_history"`
-	DecidedAt              *time.Time           `json:"decided_at"`
-	Version                int                  `json:"version"`
-	Evaluations            []SemproEvaluation   `json:"evaluations"`
-	StudentSummaries       []StudentScoreBrief  `json:"student_summaries"`
-	RevisionItems          []RevisionItem       `json:"revision_items"`
+	ID                     string                `json:"id"`
+	ProjectID              string                `json:"project_id"`
+	ScheduledAt            time.Time             `json:"scheduled_at"`
+	Location               string                `json:"location"`
+	Examiner1ID            string                `json:"examiner_1_id"`
+	Examiner1Name          string                `json:"examiner_1_name"`
+	Examiner2ID            string                `json:"examiner_2_id"`
+	Examiner2Name          string                `json:"examiner_2_name"`
+	Examiner3ID            string                `json:"examiner_3_id"`
+	Examiner3Name          string                `json:"examiner_3_name"`
+	Status                 string                `json:"status"`
+	OutcomeNote            string                `json:"outcome_note"`
+	MinutesFileID          *string               `json:"minutes_file_id"`
+	RevisionApprovedFileID *string               `json:"revision_approved_file_id"`
+	ScheduleHistory        []map[string]any      `json:"schedule_history"`
+	DecidedAt              *time.Time            `json:"decided_at"`
+	Version                int                   `json:"version"`
+	Evaluations            []SemproEvaluation    `json:"evaluations"`
+	Attendance             []FinalExamAttendance `json:"attendance"`
+	StudentSummaries       []StudentScoreBrief   `json:"student_summaries"`
+	RevisionItems          []RevisionItem        `json:"revision_items"`
 }
 
 type FinalExamEvaluateInput struct {

@@ -247,8 +247,16 @@ func (s *Server) saveDocument(c fiber.Ctx) error {
 			_, e = tx.Exec(c.Context(), `INSERT INTO capstone_service.project_documents(id,project_id,series,file_id,uploaded_by,uploaded_by_name,summary) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, p.ID, in.Series, in.FileID, u.ID, u.FullName, in.Summary)
 		}
 	} else if e == nil {
-		if e = stale(existingVersion, in.Version); e != nil {
-			return e
+		if in.Version != 0 {
+			if e = stale(existingVersion, in.Version); e != nil {
+				return e
+			}
+		} else {
+			var existingSummary string
+			_ = tx.QueryRow(c.Context(), `SELECT summary FROM capstone_service.project_documents WHERE id=$1`, id).Scan(&existingSummary)
+			if existingVersion != 1 || existingSummary != "Disinkronkan dari pendaftaran ujian proposal" {
+				return fiber.ErrConflict
+			}
 		}
 		newVersionNo = currentVersionNo + 1
 		if hasFull {

@@ -136,7 +136,7 @@ func loadSeminarForProject(ctx context.Context, db querier, projectID string, pa
 	}
 
 	if hasFull {
-		apRows, e := db.Query(ctx, `SELECT supervisor_id,supervisor_name,status,note,signed_at FROM capstone_service.sempro_advisor_approvals WHERE project_id=$1 ORDER BY supervisor_name`, projectID)
+		apRows, e := db.Query(ctx, `SELECT DISTINCT ON (supervisor_id) supervisor_id,supervisor_name,status,note,signed_at FROM capstone_service.sempro_advisor_approvals WHERE project_id=$1 ORDER BY supervisor_id, signed_at DESC NULLS LAST`, projectID)
 		if e != nil {
 			return nil, e
 		}
@@ -462,7 +462,7 @@ func (s *Server) evaluateSempro(c fiber.Ctx) error {
 		evaluatorRole = "EXAMINER_3"
 	default:
 		var isSupervisor bool
-		if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND supervisor_id=$2)`, projectID, actor(c).ID).Scan(&isSupervisor); e != nil {
+		if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND supervisor_id=$2 AND student_id=$3)`, projectID, actor(c).ID, in.StudentID).Scan(&isSupervisor); e != nil {
 			return e
 		}
 		if !isSupervisor {

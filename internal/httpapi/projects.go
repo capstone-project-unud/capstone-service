@@ -52,7 +52,7 @@ func loadProject(ctx context.Context, db querier, id string, lock bool) (domain.
 	}
 	studentCols := `student_id,student_name,nim,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
 	if full {
-		studentCols = `student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,is_external_supervisor,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
+		studentCols = `student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,is_external_supervisor,external_supervisor_name,external_supervisor_institution,title_status,confirmation_status,note,title_actor,title_at,confirmation_actor,confirmation_at`
 	}
 	rows, e := db.Query(ctx, `SELECT `+studentCols+` FROM capstone_service.project_students WHERE project_id=$1 ORDER BY nim,slot`, id)
 	if e != nil {
@@ -62,7 +62,7 @@ func loadProject(ctx context.Context, db querier, id string, lock bool) (domain.
 	for rows.Next() {
 		var r domain.Participant
 		if full {
-			e = rows.Scan(&r.StudentID, &r.StudentName, &r.NIM, &r.IsLeader, &r.Responsibility, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.IsExternalSupervisor, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
+			e = rows.Scan(&r.StudentID, &r.StudentName, &r.NIM, &r.IsLeader, &r.Responsibility, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.IsExternalSupervisor, &r.ExternalSupervisorName, &r.ExternalSupervisorInstitution, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
 		} else {
 			e = rows.Scan(&r.StudentID, &r.StudentName, &r.NIM, &r.Slot, &r.CandidateID, &r.CandidateName, &r.SupervisorID, &r.SupervisorName, &r.TitleStatus, &r.ConfirmationStatus, &r.Note, &r.TitleActor, &r.TitleAt, &r.ConfirmationActor, &r.ConfirmationAt)
 			r.IsLeader = r.StudentID == p.OwnerID
@@ -325,8 +325,15 @@ func (s *Server) persistProject(c fiber.Ctx, create bool, in domain.ProjectInput
 				name = u.FullName
 			}
 			if full {
-				_, e = tx.Exec(ctx, `INSERT INTO capstone_service.project_students(project_id,academic_period_id,student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-					id, resolvedPeriodID, student.ID, student.FullName, student.NIM, isLeader, resp, i+1, candidate, name)
+				extFlag := m.IsExternalSupervisor || m.ExternalSupervisorName != ""
+				extName := ""
+				extInst := ""
+				if i == 1 && extFlag {
+					extName = m.ExternalSupervisorName
+					extInst = m.ExternalSupervisorInstitution
+				}
+				_, e = tx.Exec(ctx, `INSERT INTO capstone_service.project_students(project_id,academic_period_id,student_id,student_name,nim,is_leader,responsibility,slot,candidate_id,candidate_name,is_external_supervisor,external_supervisor_name,external_supervisor_institution) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+					id, resolvedPeriodID, student.ID, student.FullName, student.NIM, isLeader, resp, i+1, candidate, name, i == 1 && extFlag, extName, extInst)
 			} else {
 				_, e = tx.Exec(ctx, `INSERT INTO capstone_service.project_students(project_id,student_id,student_name,nim,slot,candidate_id,candidate_name) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, student.ID, student.FullName, student.NIM, i+1, candidate, name)
 			}

@@ -54,31 +54,36 @@ type Project struct {
 	Students                 []Participant `json:"students"`
 }
 type Participant struct {
-	StudentID            string     `json:"student_id"`
-	StudentName          string     `json:"student_name"`
-	NIM                  string     `json:"nim"`
-	IsLeader             bool       `json:"is_leader"`
-	Responsibility       string     `json:"responsibility"`
-	Slot                 int        `json:"slot"`
-	CandidateID          *string    `json:"candidate_id"`
-	CandidateName        string     `json:"candidate_name"`
-	SupervisorID         *string    `json:"supervisor_id"`
-	SupervisorName       string     `json:"supervisor_name"`
-	IsExternalSupervisor bool       `json:"is_external_supervisor"`
-	TitleStatus          string     `json:"title_status"`
-	ConfirmationStatus   string     `json:"confirmation_status"`
-	Note                 string     `json:"note"`
-	TitleActor           *string    `json:"title_actor"`
-	TitleAt              *time.Time `json:"title_at"`
-	ConfirmationActor    *string    `json:"confirmation_actor"`
-	ConfirmationAt       *time.Time `json:"confirmation_at"`
+	StudentID                     string     `json:"student_id"`
+	StudentName                   string     `json:"student_name"`
+	NIM                           string     `json:"nim"`
+	IsLeader                      bool       `json:"is_leader"`
+	Responsibility                string     `json:"responsibility"`
+	Slot                          int        `json:"slot"`
+	CandidateID                   *string    `json:"candidate_id"`
+	CandidateName                 string     `json:"candidate_name"`
+	SupervisorID                  *string    `json:"supervisor_id"`
+	SupervisorName                string     `json:"supervisor_name"`
+	IsExternalSupervisor          bool       `json:"is_external_supervisor"`
+	ExternalSupervisorName        string     `json:"external_supervisor_name"`
+	ExternalSupervisorInstitution string     `json:"external_supervisor_institution"`
+	TitleStatus                   string     `json:"title_status"`
+	ConfirmationStatus            string     `json:"confirmation_status"`
+	Note                          string     `json:"note"`
+	TitleActor                    *string    `json:"title_actor"`
+	TitleAt                       *time.Time `json:"title_at"`
+	ConfirmationActor             *string    `json:"confirmation_actor"`
+	ConfirmationAt                *time.Time `json:"confirmation_at"`
 }
 type MemberInput struct {
-	StudentID      string  `json:"student_id"`
-	IsLeader       bool    `json:"is_leader"`
-	Responsibility string  `json:"responsibility"`
-	Candidate1     *string `json:"candidate_1"`
-	Candidate2     *string `json:"candidate_2"`
+	StudentID                     string  `json:"student_id"`
+	IsLeader                      bool    `json:"is_leader"`
+	Responsibility                string  `json:"responsibility"`
+	Candidate1                    *string `json:"candidate_1"`
+	Candidate2                    *string `json:"candidate_2"`
+	IsExternalSupervisor          bool    `json:"is_external_supervisor"`
+	ExternalSupervisorName        string  `json:"external_supervisor_name"`
+	ExternalSupervisorInstitution string  `json:"external_supervisor_institution"`
 }
 type ProjectInput struct {
 	GroupID           *string       `json:"group_id"`
@@ -108,7 +113,13 @@ func (in *ProjectInput) Validate(owner string) error {
 		return fmt.Errorf("Kelompok harus berisi 2–5 mahasiswa.")
 	}
 	seen := map[string]bool{}
-	for _, m := range in.Members {
+	for i := range in.Members {
+		m := &in.Members[i]
+		m.ExternalSupervisorName = strings.TrimSpace(m.ExternalSupervisorName)
+		m.ExternalSupervisorInstitution = strings.TrimSpace(m.ExternalSupervisorInstitution)
+		if len([]rune(m.ExternalSupervisorName)) > 150 || len([]rune(m.ExternalSupervisorInstitution)) > 200 {
+			return fmt.Errorf("Nama atau institusi pembimbing eksternal/mitra terlalu panjang.")
+		}
 		if !ValidID(m.StudentID) || seen[m.StudentID] || !ValidOptional(m.Candidate1) || !ValidOptional(m.Candidate2) {
 			return fmt.Errorf("Anggota atau calon pembimbing tidak valid atau berulang.")
 		}

@@ -21,24 +21,26 @@ type ProposalDocument struct {
 	ReviewedAt *time.Time `json:"reviewed_at"`
 }
 type Proposal struct {
-	ID             string             `json:"id"`
-	ProjectID      string             `json:"project_id"`
-	Title          string             `json:"title"`
-	InterestID     string             `json:"interest_id"`
-	InterestName   string             `json:"interest_name"`
-	StudentID      string             `json:"student_id"`
-	StudentName    string             `json:"student_name"`
-	NIM            string             `json:"nim"`
-	Supervisor1    string             `json:"supervisor_1_name"`
-	Supervisor2    string             `json:"supervisor_2_name"`
-	SimakFileID    string             `json:"simak_file_id"`
-	ApprovalFileID string             `json:"approval_file_id"`
-	SimakStatus    string             `json:"simak_status"`
-	ApprovalStatus string             `json:"approval_status"`
-	Documents      []ProposalDocument `json:"documents"`
-	Version        int                `json:"version"`
-	SubmittedAt    time.Time          `json:"submitted_at"`
-	Ready          bool               `json:"ready"`
+	ID                    string             `json:"id"`
+	ProjectID             string             `json:"project_id"`
+	Title                 string             `json:"title"`
+	InterestID            string             `json:"interest_id"`
+	InterestName          string             `json:"interest_name"`
+	StudentID             string             `json:"student_id"`
+	StudentName           string             `json:"student_name"`
+	NIM                   string             `json:"nim"`
+	Supervisor1           string             `json:"supervisor_1_name"`
+	Supervisor2           string             `json:"supervisor_2_name"`
+	GuidanceApprovedCount int                `json:"guidance_approved_count"`
+	SupervisorCount       int                `json:"supervisor_count"`
+	SimakFileID           string             `json:"simak_file_id"`
+	ApprovalFileID        string             `json:"approval_file_id"`
+	SimakStatus           string             `json:"simak_status"`
+	ApprovalStatus        string             `json:"approval_status"`
+	Documents             []ProposalDocument `json:"documents"`
+	Version               int                `json:"version"`
+	SubmittedAt           time.Time          `json:"submitted_at"`
+	Ready                 bool               `json:"ready"`
 }
 
 func revisionSchema(ctx context.Context, db querier) error {
@@ -59,7 +61,10 @@ func loadProposals(ctx context.Context, db querier, u domain.User, interest, val
 		return nil, fiber.ErrBadRequest
 	}
 	rows, e := db.Query(ctx, `SELECT a.id,a.project_id,p.title,p.interest_id,i.name,a.student_id,m.student_name,m.nim,
- coalesce(m.supervisor_name,''),coalesce(m2.supervisor_name,''),a.simak_file_id,a.approval_file_id,a.simak_status,a.approval_status,a.version,a.submitted_at,
+ coalesce(m.supervisor_name,''),coalesce(nullif(m2.supervisor_name,''), CASE WHEN m2.is_external_supervisor AND m2.external_supervisor_name<>'' THEN m2.external_supervisor_name ELSE '' END,''),
+ coalesce((SELECT count(*) FROM capstone_service.guidance_logs gl WHERE gl.project_id=a.project_id AND gl.student_id=a.student_id AND gl.status='APPROVED'),0),
+ coalesce((SELECT count(*) FROM capstone_service.project_students ps WHERE ps.project_id=a.project_id AND ps.student_id=a.student_id AND (ps.supervisor_id IS NOT NULL OR (ps.slot=2 AND ps.is_external_supervisor AND ps.external_supervisor_name<>''))),0),
+ a.simak_file_id,a.approval_file_id,a.simak_status,a.approval_status,a.version,a.submitted_at,
  coalesce((SELECT jsonb_agg(jsonb_build_object('kind',d.kind,'file_id',d.file_id,'status',d.status,'note',d.note,'reviewer',d.reviewer,'reviewed_at',d.reviewed_at) ORDER BY d.kind) FROM capstone_service.proposal_documents d WHERE d.application_id=a.id),'[]'::jsonb)
  FROM capstone_service.proposal_applications a JOIN capstone_service.projects p ON p.id=a.project_id JOIN capstone_service.interest_fields i ON i.id=p.interest_id
  JOIN capstone_service.project_students m ON m.project_id=a.project_id AND m.student_id=a.student_id AND m.slot=1
@@ -75,7 +80,7 @@ func loadProposals(ctx context.Context, db querier, u domain.User, interest, val
 		count++
 		var a Proposal
 		var raw []byte
-		if e = rows.Scan(&a.ID, &a.ProjectID, &a.Title, &a.InterestID, &a.InterestName, &a.StudentID, &a.StudentName, &a.NIM, &a.Supervisor1, &a.Supervisor2, &a.SimakFileID, &a.ApprovalFileID, &a.SimakStatus, &a.ApprovalStatus, &a.Version, &a.SubmittedAt, &raw); e != nil {
+		if e = rows.Scan(&a.ID, &a.ProjectID, &a.Title, &a.InterestID, &a.InterestName, &a.StudentID, &a.StudentName, &a.NIM, &a.Supervisor1, &a.Supervisor2, &a.GuidanceApprovedCount, &a.SupervisorCount, &a.SimakFileID, &a.ApprovalFileID, &a.SimakStatus, &a.ApprovalStatus, &a.Version, &a.SubmittedAt, &raw); e != nil {
 			return nil, e
 		}
 		if e = json.Unmarshal(raw, &a.Documents); e != nil {
@@ -201,7 +206,12 @@ func (s *Server) saveProposal(c fiber.Ctx) error {
 		if i == 0 || i == 2 {
 			mime = ""
 		}
-		if e = s.ownedFile(c.Context(), tx, id, actor(c).ID, mime); e != nil {
+		if i >= 3 {
+			e = s.projectOrOwnedFile(c.Context(), tx, id, actor(c).ID, p.ID, mime)
+		} else {
+			e = s.ownedFile(c.Context(), tx, id, actor(c).ID, mime)
+		}
+		if e != nil {
 			return e
 		}
 	}
@@ -245,6 +255,46 @@ func (s *Server) saveProposal(c fiber.Ctx) error {
 		_, e = tx.Exec(c.Context(), `UPDATE capstone_service.proposal_applications a SET `+k+`_status=d.status,`+k+`_note=d.note,`+k+`_reviewer=d.reviewer,`+k+`_reviewed_at=d.reviewed_at FROM capstone_service.proposal_documents d WHERE a.id=$1 AND d.application_id=a.id AND d.kind=$2`, id, k)
 		if e != nil {
 			return e
+		}
+	}
+	if hasFull, err := hasFullSOPSchema(c.Context(), tx); err == nil && hasFull {
+		syncDocs := []struct{ code, fileID string }{
+			{"PROPOSAL_USULAN", in.Proposal},
+			{"B-100", in.B100},
+			{"B-200", in.B200},
+		}
+		u := actor(c)
+		const syncSummary = "Disinkronkan dari pendaftaran ujian proposal"
+		for _, sd := range syncDocs {
+			var docID, curFile string
+			var curVerNo int
+			err := tx.QueryRow(c.Context(), `SELECT id,file_id::text,current_version_no FROM capstone_service.project_documents WHERE project_id=$1 AND doc_type_code=$2 AND student_id IS NULL FOR UPDATE`, p.ID, sd.code).Scan(&docID, &curFile, &curVerNo)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			var fileName string
+			_ = tx.QueryRow(c.Context(), `SELECT name FROM capstone_service.files WHERE id=$1`, sd.fileID).Scan(&fileName)
+			if errors.Is(err, pgx.ErrNoRows) {
+				docID = uuid.NewString()
+				if _, err = tx.Exec(c.Context(), `INSERT INTO capstone_service.project_documents(id,project_id,doc_type_code,student_id,series,file_id,uploaded_by,uploaded_by_name,summary,revision_no,current_version_no) VALUES($1,$2,$3,NULL,$3,$4,$5,$6,$7,1,1)`,
+					docID, p.ID, sd.code, sd.fileID, u.ID, u.FullName, syncSummary); err != nil {
+					return err
+				}
+				if _, err = tx.Exec(c.Context(), `INSERT INTO capstone_service.project_document_versions(id,document_id,version_no,file_id,file_name,summary,uploaded_by,uploaded_by_name,review_status) VALUES($1,$2,1,$3,$4,$5,$6,$7,'PENDING')`,
+					uuid.NewString(), docID, sd.fileID, fileName, syncSummary, u.ID, u.FullName); err != nil {
+					return err
+				}
+			} else if curFile != sd.fileID {
+				curVerNo++
+				if _, err = tx.Exec(c.Context(), `UPDATE capstone_service.project_documents SET file_id=$2,uploaded_by=$3,uploaded_by_name=$4,summary=$5,revision_no=$6,current_version_no=$6,status='PENDING',review_note='',reviewer_id=NULL,reviewer_name='',reviewed_at=NULL,version=version+1,updated_at=now() WHERE id=$1`,
+					docID, sd.fileID, u.ID, u.FullName, syncSummary, curVerNo); err != nil {
+					return err
+				}
+				if _, err = tx.Exec(c.Context(), `INSERT INTO capstone_service.project_document_versions(id,document_id,version_no,file_id,file_name,summary,uploaded_by,uploaded_by_name,review_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PENDING')`,
+					uuid.NewString(), docID, curVerNo, sd.fileID, fileName, syncSummary, u.ID, u.FullName); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	if e = audit(c.Context(), tx, actor(c), p.ID, "PROPOSAL_SUBMITTED", in); e != nil {

@@ -31,25 +31,27 @@ type examAttendance struct {
 	ConfirmedAt time.Time `json:"confirmed_at"`
 }
 type proposalExam struct {
-	ID            string                 `json:"id"`
-	ApplicationID string                 `json:"application_id"`
-	ProjectID     string                 `json:"project_id"`
-	StudentID     string                 `json:"student_id"`
-	StudentName   string                 `json:"student_name"`
-	NIM           string                 `json:"nim"`
-	Title         string                 `json:"title"`
-	ScheduledAt   time.Time              `json:"scheduled_at"`
-	Location      string                 `json:"location"`
-	Panel         []examPanel            `json:"panel"`
-	PolicyID      *string                `json:"policy_id"`
-	Policy        *domain.ProposalPolicy `json:"policy"`
-	Version       int                    `json:"version"`
-	Evaluations   []examEvaluation       `json:"evaluations"`
-	Attendance    []examAttendance       `json:"attendance"`
-	FinalScore    *float64               `json:"final_score"`
-	Letter        string                 `json:"letter"`
-	Category      string                 `json:"category"`
-	Outcome       string                 `json:"outcome"`
+	ID                     string                 `json:"id"`
+	ApplicationID          string                 `json:"application_id"`
+	ProjectID              string                 `json:"project_id"`
+	StudentID              string                 `json:"student_id"`
+	StudentName            string                 `json:"student_name"`
+	NIM                    string                 `json:"nim"`
+	Title                  string                 `json:"title"`
+	ScheduledAt            time.Time              `json:"scheduled_at"`
+	Location               string                 `json:"location"`
+	Panel                  []examPanel            `json:"panel"`
+	PolicyID               *string                `json:"policy_id"`
+	Policy                 *domain.ProposalPolicy `json:"policy"`
+	RevisionApprovedFileID *string                `json:"revision_approved_file_id"`
+	RevisionItems          []domain.RevisionItem  `json:"revision_items"`
+	Version                int                    `json:"version"`
+	Evaluations            []examEvaluation       `json:"evaluations"`
+	Attendance             []examAttendance       `json:"attendance"`
+	FinalScore             *float64               `json:"final_score"`
+	Letter                 string                 `json:"letter"`
+	Category               string                 `json:"category"`
+	Outcome                string                 `json:"outcome"`
 }
 
 func (ex proposalExam) panelMember(id string) *examPanel {
@@ -67,7 +69,8 @@ func (ex proposalExam) canRead(u domain.User) bool {
 const proposalExamSelect = `SELECT to_jsonb(e)||jsonb_build_object(
  'project_id',a.project_id,'student_id',a.student_id,'student_name',m.student_name,'nim',m.nim,'title',p.title,'policy',gp.rules,
  'evaluations',coalesce((SELECT jsonb_agg(to_jsonb(v)-'signature_key' ORDER BY v.evaluator_id) FROM capstone_service.proposal_exam_evaluations v WHERE v.exam_id=e.id),'[]'::jsonb),
- 'attendance',coalesce((SELECT jsonb_agg(to_jsonb(t)-'signature_key' ORDER BY t.lecturer_id) FROM capstone_service.proposal_exam_attendance t WHERE t.exam_id=e.id),'[]'::jsonb))
+ 'attendance',coalesce((SELECT jsonb_agg(to_jsonb(t)-'signature_key' ORDER BY t.lecturer_id) FROM capstone_service.proposal_exam_attendance t WHERE t.exam_id=e.id),'[]'::jsonb),
+ 'revision_items',coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.created_at ASC) FROM capstone_service.seminar_revision_items r WHERE r.stage='SEMPRO' AND r.seminar_id=e.id),'[]'::jsonb))
  FROM capstone_service.proposal_exams e JOIN capstone_service.proposal_applications a ON a.id=e.application_id
  JOIN capstone_service.projects p ON p.id=a.project_id JOIN capstone_service.project_students m ON m.project_id=a.project_id AND m.student_id=a.student_id AND m.slot=1
  LEFT JOIN capstone_service.proposal_grading_policies gp ON gp.id=e.policy_id `

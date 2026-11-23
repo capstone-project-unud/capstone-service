@@ -2,13 +2,185 @@ package httpapi
 
 import (
 	"capstone/capstone-service/internal/domain"
+	"capstone/capstone-service/internal/storage"
 	"errors"
+	"mime"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
+
+func categoryDisplayLabel(cat string) string {
+	switch cat {
+	case "SOFTWARE":
+		return "Software & Aplikasi"
+	case "HARDWARE":
+		return "Hardware & Produk Alat"
+	case "ALGORITMA":
+		return "Algoritma & Pemodelan"
+	case "DOKUMEN_STRATEGIS":
+		return "Dokumen Strategis & Simulasi"
+	default:
+		return cat
+	}
+}
+
+func (s *Server) publicExpo(c fiber.Ctx) error {
+	ok, e := hasFullSOPSchema(c.Context(), s.DB)
+	if e != nil || !ok {
+		return c.JSON(fiber.Map{"items": []fiber.Map{}})
+	}
+	rows, e := s.DB.Query(c.Context(), `
+		SELECT ex.id,ex.project_id,coalesce(cg.code,'CAPSTONE'),coalesce(ap.name,'Periode Aktif'),
+		       ex.title,ex.category,i.name,ex.abstract_id,ex.abstract_en,p.summary,
+		       ex.poster_file_id,ex.video_url,ex.repo_url,ex.demo_url,ex.journal_title,ex.journal_class,ex.published_at
+		FROM capstone_service.expo_submissions ex
+		JOIN capstone_service.projects p ON p.id=ex.project_id
+		JOIN capstone_service.interest_fields i ON i.id=p.interest_id
+		LEFT JOIN capstone_service.capstone_groups cg ON cg.id=p.group_id
+		LEFT JOIN capstone_service.academic_periods ap ON ap.id=coalesce(p.academic_period_id, cg.academic_period_id)
+		WHERE ex.status='PUBLISHED'
+		ORDER BY ex.published_at DESC NULLS LAST, ex.updated_at DESC LIMIT 200`)
+	if e != nil {
+		return e
+	}
+	defer rows.Close()
+	type member struct {
+		Name           string `json:"name"`
+		NIM            string `json:"nim"`
+		IsLeader       bool   `json:"is_leader"`
+		Responsibility string `json:"responsibility"`
+	}
+	type item struct {
+		ID                 string         `json:"id"`
+		ProjectID          string         `json:"project_id"`
+		GroupCode          string         `json:"group_code"`
+		AcademicPeriodName string         `json:"academic_period_name"`
+		Title              string         `json:"title"`
+		Category           string         `json:"category"`
+		CategoryLabel      string         `json:"category_label"`
+		InterestName       string         `json:"interest_name"`
+		AbstractID         string         `json:"abstract_id"`
+		AbstractEN         string         `json:"abstract_en"`
+		Supervisors        [2]string      `json:"supervisors"`
+		Members            []member       `json:"members"`
+		Poster             map[string]any `json:"poster"`
+		PosterFileID       *string        `json:"poster_file_id"`
+		VideoURL           string         `json:"video_url"`
+		RepoURL            string         `json:"repo_url"`
+		DemoURL            string         `json:"demo_url"`
+		JournalTitle       string         `json:"journal_title"`
+		JournalClass       string         `json:"journal_class"`
+		PublishedAt        string         `json:"published_at"`
+		IsMockPreview      bool           `json:"is_mock_preview"`
+	}
+	items := []item{}
+	for rows.Next() {
+		var it item
+		var projSummary string
+		var pubAt *time.Time
+		if e = rows.Scan(&it.ID, &it.ProjectID, &it.GroupCode, &it.AcademicPeriodName, &it.Title, &it.Category, &it.InterestName, &it.AbstractID, &it.AbstractEN, &projSummary, &it.PosterFileID, &it.VideoURL, &it.RepoURL, &it.DemoURL, &it.JournalTitle, &it.JournalClass, &pubAt); e != nil {
+			return e
+		}
+		it.CategoryLabel = categoryDisplayLabel(it.Category)
+		if pubAt != nil {
+			it.PublishedAt = pubAt.Format("2006-01-02")
+		}
+		it.Members = []member{}
+		it.Poster = map[string]any{
+			"problem_summary":      projSummary,
+			"architecture_nodes":   []string{"Input & Sensor", "Proses Sistem", "Luaran Layanan", "Validasi"},
+			"architecture_summary": it.AbstractID,
+			"test_highlights": []map[string]any{
+				{"label": "Kelulusan Ujian Akhir", "value": "Lulus & Terverifikasi", "score_pct": 100},
+			},
+			"conclusion": "Karya Capstone Project terpublikasi resmi pada Galeri PSTI Universitas Udayana.",
+		}
+		items = append(items, it)
+	}
+	if e = rows.Err(); e != nil {
+		return e
+	}
+	for i := range items {
+		pRows, err := s.DB.Query(c.Context(), `SELECT student_name,nim,is_leader,responsibility,slot,coalesce(supervisor_name,''),is_external_supervisor,external_supervisor_name,external_supervisor_institution FROM capstone_service.project_students WHERE project_id=$1 ORDER BY is_leader DESC, nim, slot`, items[i].ProjectID)
+		if err != nil {
+			return err
+		}
+		seenMem := map[string]bool{}
+		for pRows.Next() {
+			var sName, nim, resp, supName, extName, extInst string
+			var isLeader, extFlag bool
+			var slot int
+			if err = pRows.Scan(&sName, &nim, &isLeader, &resp, &slot, &supName, &extFlag, &extName, &extInst); err != nil {
+				pRows.Close()
+				return err
+			}
+			if !seenMem[nim+":"+sName] {
+				seenMem[nim+":"+sName] = true
+				items[i].Members = append(items[i].Members, member{Name: sName, NIM: nim, IsLeader: isLeader, Responsibility: resp})
+			}
+			if slot == 1 && supName != "" && items[i].Supervisors[0] == "" {
+				items[i].Supervisors[0] = supName
+			}
+			if slot == 2 {
+				if supName != "" && items[i].Supervisors[1] == "" {
+					items[i].Supervisors[1] = supName
+				} else if extFlag && extName != "" && items[i].Supervisors[1] == "" {
+					items[i].Supervisors[1] = extName
+					if extInst != "" {
+						items[i].Supervisors[1] += " (" + extInst + ")"
+					}
+				}
+			}
+		}
+		pRows.Close()
+		if items[i].Supervisors[0] == "" {
+			items[i].Supervisors[0] = "Dosen Pembimbing 1 PSTI"
+		}
+		if items[i].Supervisors[1] == "" {
+			items[i].Supervisors[1] = "Dosen Pembimbing 2 PSTI"
+		}
+		if items[i].JournalClass == "" {
+			items[i].JournalClass = "Luaran Publikasi"
+		}
+		if items[i].JournalTitle == "" {
+			items[i].JournalTitle = "Draft Artikel Ilmiah Capstone PSTI Unud"
+		}
+	}
+	return c.JSON(fiber.Map{"items": items})
+}
+
+func (s *Server) publicExpoPoster(c fiber.Ctx) error {
+	id := c.Params("id")
+	if !domain.ValidID(id) {
+		return fiber.ErrBadRequest
+	}
+	ok, e := hasFullSOPSchema(c.Context(), s.DB)
+	if e != nil || !ok {
+		return fiber.ErrNotFound
+	}
+	var fileID string
+	if e = s.DB.QueryRow(c.Context(), `SELECT poster_file_id FROM capstone_service.expo_submissions WHERE id=$1 AND status='PUBLISHED' AND poster_file_id IS NOT NULL`, id).Scan(&fileID); e != nil {
+		return fiber.ErrNotFound
+	}
+	var name, m, key string
+	if e = s.DB.QueryRow(c.Context(), `SELECT name,mime,storage_key FROM capstone_service.files WHERE id=$1`, fileID).Scan(&name, &m, &key); e != nil {
+		return e
+	}
+	b, e := s.Files.Get(c.Context(), key)
+	if e != nil {
+		return fiber.NewError(503, "Poster belum dapat diunduh.")
+	}
+	if len(b) > storage.MaxFile {
+		return fiber.ErrRequestEntityTooLarge
+	}
+	c.Set("Content-Type", m)
+	c.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name}))
+	return c.Send(b)
+}
 
 func (s *Server) listExpo(c fiber.Ctx) error {
 	ok, e := hasFullSOPSchema(c.Context(), s.DB)

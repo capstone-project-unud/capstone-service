@@ -57,13 +57,13 @@ func loadGroup(ctx context.Context, db querier, id string) (domain.CapstoneGroup
 		return g, e
 	}
 	if g.ProjectID != nil {
-		aRows, e := db.Query(ctx, `SELECT student_id,student_name,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,title_status,confirmation_status FROM capstone_service.project_students WHERE project_id=$1 ORDER BY nim, slot`, *g.ProjectID)
+		aRows, e := db.Query(ctx, `SELECT student_id,student_name,slot,candidate_id,candidate_name,supervisor_id,supervisor_name,is_external_supervisor,external_supervisor_name,external_supervisor_institution,title_status,confirmation_status FROM capstone_service.project_students WHERE project_id=$1 ORDER BY nim, slot`, *g.ProjectID)
 		if e != nil {
 			return g, e
 		}
 		for aRows.Next() {
 			var ab domain.GroupAdvisorBrief
-			if e = aRows.Scan(&ab.StudentID, &ab.StudentName, &ab.Slot, &ab.CandidateID, &ab.CandidateName, &ab.SupervisorID, &ab.SupervisorName, &ab.TitleStatus, &ab.ConfirmationStatus); e != nil {
+			if e = aRows.Scan(&ab.StudentID, &ab.StudentName, &ab.Slot, &ab.CandidateID, &ab.CandidateName, &ab.SupervisorID, &ab.SupervisorName, &ab.IsExternalSupervisor, &ab.ExternalSupervisorName, &ab.ExternalSupervisorInstitution, &ab.TitleStatus, &ab.ConfirmationStatus); e != nil {
 				aRows.Close()
 				return g, e
 			}

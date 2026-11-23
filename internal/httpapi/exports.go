@@ -4,6 +4,7 @@ import (
 	"capstone/capstone-service/internal/reports"
 	"fmt"
 	"github.com/gofiber/fiber/v3"
+	"strings"
 	"time"
 )
 
@@ -15,14 +16,25 @@ func (s *Server) exportProjects(c fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
-	rows := [][]string{{"ID judul", "Judul", "Bidang minat", "Status", "Mahasiswa", "NIM", "Posisi pembimbing", "Calon pembimbing", "Persetujuan judul", "Kesediaan membimbing", "Pembimbing ditetapkan", "Catatan", "Waktu finalisasi"}}
+	rows := [][]string{{"ID judul", "Judul", "Bidang minat", "Status", "Mahasiswa", "NIM", "Peran", "Posisi pembimbing", "Calon pembimbing", "Persetujuan judul", "Kesediaan membimbing", "Pembimbing ditetapkan", "Pembimbing Mitra/Eksternal", "Catatan", "Waktu finalisasi"}}
 	for _, p := range items {
 		at := ""
 		if p.FinalizedAt != nil {
 			at = p.FinalizedAt.In(time.FixedZone("WITA", 8*60*60)).Format("2006-01-02 15:04 MST")
 		}
 		for _, r := range p.Students {
-			rows = append(rows, []string{p.ID, p.Title, p.InterestName, p.Status, r.StudentName, r.NIM, fmt.Sprint(r.Slot), r.CandidateName, r.TitleStatus, r.ConfirmationStatus, r.SupervisorName, r.Note, at})
+			roleLabel := "Anggota"
+			if r.IsLeader {
+				roleLabel = "Ketua Kelompok"
+			}
+			extLabel := ""
+			if r.ExternalSupervisorName != "" {
+				extLabel = r.ExternalSupervisorName
+				if r.ExternalSupervisorInstitution != "" {
+					extLabel += " (" + r.ExternalSupervisorInstitution + ")"
+				}
+			}
+			rows = append(rows, []string{p.ID, p.Title, p.InterestName, p.Status, r.StudentName, r.NIM, roleLabel, fmt.Sprint(r.Slot), r.CandidateName, r.TitleStatus, r.ConfirmationStatus, r.SupervisorName, extLabel, r.Note, at})
 		}
 	}
 	b, e := reports.XLSX(rows)
@@ -42,13 +54,30 @@ func (s *Server) letter(c fiber.Ctx) error {
 		return fiber.NewError(422, "Surat tersedia setelah finalisasi judul.")
 	}
 	paras := []string{"Format sementara. Nomor surat, kop, dasar penetapan, dan penandatangan mengikuti format resmi yang akan ditetapkan program studi.", "Judul: " + p.Title, "Bidang minat: " + p.InterestName}
+	byStudent := map[string][]string{}
+	order := []string{}
 	for _, r := range p.Students {
-		if r.Slot == 1 {
-			paras = append(paras, "Mahasiswa: "+r.StudentName+" | NIM: "+r.NIM)
+		if _, ok := byStudent[r.StudentID]; !ok {
+			order = append(order, r.StudentID)
+			role := "Anggota"
+			if r.IsLeader {
+				role = "Ketua Kelompok"
+			}
+			byStudent[r.StudentID] = []string{fmt.Sprintf("Mahasiswa: %s (NIM %s · %s)", r.StudentName, r.NIM, role)}
 		}
 		if r.SupervisorID != nil {
-			paras = append(paras, fmt.Sprintf("Pembimbing %d: %s", r.Slot, r.SupervisorName))
+			byStudent[r.StudentID] = append(byStudent[r.StudentID], fmt.Sprintf("  - Pembimbing %d (%s): %s", r.Slot, r.StudentName, r.SupervisorName))
 		}
+		if r.Slot == 2 && r.ExternalSupervisorName != "" {
+			ext := r.ExternalSupervisorName
+			if r.ExternalSupervisorInstitution != "" {
+				ext += " · " + r.ExternalSupervisorInstitution
+			}
+			byStudent[r.StudentID] = append(byStudent[r.StudentID], fmt.Sprintf("  - Pembimbing Tambahan / Mitra (%s): %s", r.StudentName, ext))
+		}
+	}
+	for _, sid := range order {
+		paras = append(paras, strings.Join(byStudent[sid], "\n"))
 	}
 	if p.FinalizedAt != nil {
 		paras = append(paras, "Tanggal penetapan: "+p.FinalizedAt.In(time.FixedZone("WITA", 8*60*60)).Format("02-01-2006"))
@@ -62,7 +91,7 @@ func (s *Server) letter(c fiber.Ctx) error {
 	return c.Send(b)
 }
 func (s *Server) exportGuidance(c fiber.Ctx) error {
-	if e := require(c, "MAHASISWA", "DOSEN", "KOORDINATOR_TA", "ADMIN"); e != nil {
+	if e := require(c, "MAHASISWA", "DOSEN", "KOORDINATOR_TA", "ADMIN", "KOPRODI"); e != nil {
 		return e
 	}
 	items, e := s.guidanceList(c)

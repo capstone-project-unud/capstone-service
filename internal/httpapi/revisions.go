@@ -46,10 +46,11 @@ func (s *Server) saveSemproApproval(c fiber.Ctx) error {
 		return fiber.ErrBadRequest
 	}
 	var in struct {
-		Status string `json:"status"`
-		Note   string `json:"note"`
+		StudentID *string `json:"student_id"`
+		Status    string  `json:"status"`
+		Note      string  `json:"note"`
 	}
-	if c.Bind().JSON(&in) != nil || (in.Status != "APPROVED" && in.Status != "REVISION") {
+	if c.Bind().JSON(&in) != nil || !domain.ValidOptional(in.StudentID) || (in.Status != "APPROVED" && in.Status != "REVISION") {
 		return fiber.NewError(422, "Status persetujuan harus APPROVED atau REVISION.")
 	}
 	u := actor(c)
@@ -58,21 +59,46 @@ func (s *Server) saveSemproApproval(c fiber.Ctx) error {
 		return e
 	}
 	defer tx.Rollback(c.Context())
-	var isSupervisor bool
-	if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND supervisor_id=$2)`, projectID, u.ID).Scan(&isSupervisor); e != nil {
-		return e
+	var studentIDs []string
+	if in.StudentID != nil {
+		if !u.Has("KOORDINATOR_TA") {
+			var sup bool
+			if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND student_id=$2 AND supervisor_id=$3)`, projectID, *in.StudentID, u.ID).Scan(&sup); e != nil {
+				return e
+			}
+			if !sup {
+				return fiber.ErrForbidden
+			}
+		}
+		studentIDs = []string{*in.StudentID}
+	} else {
+		rows, err := tx.Query(c.Context(), `SELECT DISTINCT student_id FROM capstone_service.project_students WHERE project_id=$1 AND ($2 OR supervisor_id=$3)`, projectID, u.Has("KOORDINATOR_TA"), u.ID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var sid string
+			if err = rows.Scan(&sid); err != nil {
+				rows.Close()
+				return err
+			}
+			studentIDs = append(studentIDs, sid)
+		}
+		rows.Close()
+		if !u.Has("KOORDINATOR_TA") && len(studentIDs) == 0 {
+			return fiber.ErrForbidden
+		}
 	}
-	if !isSupervisor && !u.Has("KOORDINATOR_TA") {
-		return fiber.ErrForbidden
-	}
-	_, e = tx.Exec(c.Context(), `
-		INSERT INTO capstone_service.sempro_advisor_approvals(id,project_id,supervisor_id,supervisor_name,status,note,signed_at)
-		VALUES($1,$2,$3,$4,$5,$6,now())
-		ON CONFLICT (project_id,supervisor_id)
-		DO UPDATE SET status=EXCLUDED.status,note=EXCLUDED.note,signed_at=now(),updated_at=now()`,
-		uuid.NewString(), projectID, u.ID, u.FullName, in.Status, strings.TrimSpace(in.Note))
-	if e != nil {
-		return e
+	for _, sid := range studentIDs {
+		_, e = tx.Exec(c.Context(), `
+			INSERT INTO capstone_service.sempro_advisor_approvals(id,project_id,student_id,supervisor_id,supervisor_name,status,note,signed_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,now())
+			ON CONFLICT (project_id,supervisor_id,coalesce(student_id,'00000000-0000-0000-0000-000000000000'::uuid))
+			DO UPDATE SET status=EXCLUDED.status,note=EXCLUDED.note,signed_at=now(),updated_at=now()`,
+			uuid.NewString(), projectID, sid, u.ID, u.FullName, in.Status, strings.TrimSpace(in.Note))
+		if e != nil {
+			return e
+		}
 	}
 	if e = audit(c.Context(), tx, u, projectID, "SEMPRO_ADVISOR_SIGN", in); e != nil {
 		return e
@@ -110,6 +136,27 @@ func (s *Server) createRevisionItem(c fiber.Ctx) error {
 		return e
 	}
 	defer tx.Rollback(c.Context())
+	if !u.Has("KOORDINATOR_TA") {
+		var allowed bool
+		if in.Stage == "SEMPRO" {
+			e = tx.QueryRow(c.Context(), `
+				SELECT EXISTS(SELECT 1 FROM capstone_service.proposal_seminars s WHERE s.id=$1 AND s.project_id=$2 AND ($3 IN (s.examiner_1_id, s.examiner_2_id, s.examiner_3_id)))
+				    OR EXISTS(SELECT 1 FROM capstone_service.proposal_exams pe JOIN capstone_service.proposal_applications pa ON pa.id=pe.application_id WHERE pe.id=$1 AND pa.project_id=$2 AND pe.panel @> jsonb_build_array(jsonb_build_object('id',$3::text)))
+				    OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=$2 AND m.supervisor_id=$3 AND ($4::uuid IS NULL OR m.student_id=$4))`,
+				in.SeminarID, in.ProjectID, u.ID, in.StudentID).Scan(&allowed)
+		} else {
+			e = tx.QueryRow(c.Context(), `
+				SELECT EXISTS(SELECT 1 FROM capstone_service.final_exams fe WHERE fe.id=$1 AND fe.project_id=$2 AND ($3 IN (fe.examiner_1_id, fe.examiner_2_id, fe.examiner_3_id)))
+				    OR EXISTS(SELECT 1 FROM capstone_service.project_students m WHERE m.project_id=$2 AND m.supervisor_id=$3 AND ($4::uuid IS NULL OR m.student_id=$4))`,
+				in.SeminarID, in.ProjectID, u.ID, in.StudentID).Scan(&allowed)
+		}
+		if e != nil {
+			return e
+		}
+		if !allowed {
+			return fiber.ErrForbidden
+		}
+	}
 	id := uuid.NewString()
 	_, e = tx.Exec(c.Context(), `
 		INSERT INTO capstone_service.seminar_revision_items(id,stage,seminar_id,project_id,student_id,examiner_id,examiner_name,note,status)
@@ -230,6 +277,10 @@ func (s *Server) attachSemproRevisionApproval(c fiber.Ctx) error {
 	return s.attachStageRevisionApproval(c, "proposal_seminars", "SEMPRO_REVISION_ENDORSED")
 }
 
+func (s *Server) attachProposalExamRevisionApproval(c fiber.Ctx) error {
+	return s.attachStageRevisionApproval(c, "proposal_exams", "PROPOSAL_EXAM_REVISION_ENDORSED")
+}
+
 func (s *Server) attachStageRevisionApproval(c fiber.Ctx, table, action string) error {
 	if e := require(c, "KOORDINATOR_TA", "MAHASISWA"); e != nil {
 		return e
@@ -252,7 +303,24 @@ func (s *Server) attachStageRevisionApproval(c fiber.Ctx, table, action string) 
 	defer tx.Rollback(c.Context())
 	var projectID string
 	var ver int
-	if e = tx.QueryRow(c.Context(), `SELECT project_id,version FROM capstone_service.`+table+` WHERE id=$1 FOR UPDATE`, id).Scan(&projectID, &ver); e != nil {
+	if table == "proposal_exams" {
+		e = tx.QueryRow(c.Context(), `SELECT a.project_id,e.version FROM capstone_service.proposal_exams e JOIN capstone_service.proposal_applications a ON a.id=e.application_id WHERE e.id=$1 FOR UPDATE OF e`, id).Scan(&projectID, &ver)
+	} else {
+		e = tx.QueryRow(c.Context(), `SELECT project_id,version FROM capstone_service.`+table+` WHERE id=$1 FOR UPDATE`, id).Scan(&projectID, &ver)
+	}
+	if e != nil {
+		return e
+	}
+	if !actor(c).Has("KOORDINATOR_TA") {
+		var member bool
+		if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND student_id=$2)`, projectID, actor(c).ID).Scan(&member); e != nil {
+			return e
+		}
+		if !member {
+			return fiber.ErrForbidden
+		}
+	}
+	if e = s.ownedFile(c.Context(), tx, in.FileID, actor(c).ID, "application/pdf"); e != nil {
 		return e
 	}
 	if e = stale(ver, in.Version); e != nil {

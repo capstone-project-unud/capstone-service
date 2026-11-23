@@ -30,6 +30,34 @@ func (s *Server) ownedFile(ctx context.Context, db querier, id, owner, requiredM
 	}
 	return nil
 }
+
+func (s *Server) projectOrOwnedFile(ctx context.Context, db querier, id, owner, projectID, requiredMime string) error {
+	if !domain.ValidID(id) {
+		return fiber.ErrUnprocessableEntity
+	}
+	var uid, m string
+	if e := db.QueryRow(ctx, "SELECT owner_id,mime FROM capstone_service.files WHERE id=$1", id).Scan(&uid, &m); e != nil {
+		return e
+	}
+	if uid != owner {
+		linked := false
+		if projectID != "" {
+			if hasSchema, err := hasSemproSchema(ctx, db); err == nil && hasSchema {
+				_ = db.QueryRow(ctx, `
+					SELECT EXISTS(SELECT 1 FROM capstone_service.project_documents d WHERE d.project_id=$1 AND d.file_id=$2)
+					    OR EXISTS(SELECT 1 FROM capstone_service.project_document_versions v JOIN capstone_service.project_documents d ON d.id=v.document_id WHERE d.project_id=$1 AND v.file_id=$2)`,
+					projectID, id).Scan(&linked)
+			}
+		}
+		if !linked {
+			return fiber.ErrForbidden
+		}
+	}
+	if requiredMime != "" && m != requiredMime {
+		return fiber.NewError(422, "Berkas harus berupa PDF.")
+	}
+	return nil
+}
 func (s *Server) upload(c fiber.Ctx) error {
 	if e := require(c, "MAHASISWA", "ADMIN", "KOORDINATOR_TA"); e != nil {
 		return e

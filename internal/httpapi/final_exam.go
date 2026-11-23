@@ -114,6 +114,23 @@ func loadFinalExamForProject(ctx context.Context, db querier, projectID string, 
 	if e != nil {
 		return nil, e
 	}
+	fe.Attendance = []domain.FinalExamAttendance{}
+	attRows, e := db.Query(ctx, `SELECT lecturer_id,confirmed_at FROM capstone_service.final_exam_attendance WHERE exam_id=$1 ORDER BY lecturer_id`, fe.ID)
+	if e == nil {
+		defer attRows.Close()
+		for attRows.Next() {
+			var att domain.FinalExamAttendance
+			if scanErr := attRows.Scan(&att.LecturerID, &att.ConfirmedAt); scanErr != nil {
+				return nil, scanErr
+			}
+			fe.Attendance = append(fe.Attendance, att)
+		}
+		if attErr := attRows.Err(); attErr != nil {
+			return nil, attErr
+		}
+	} else if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+		return nil, e
+	}
 	fe.RevisionItems = revs
 	fe.StudentSummaries = summarizeStudentScores(participants, fe.Evaluations)
 	return &fe, nil
@@ -497,11 +514,18 @@ func (s *Server) evaluateFinalExam(c fiber.Ctx) error {
 	if !domain.ValidID(examID) {
 		return fiber.ErrBadRequest
 	}
-	var in domain.FinalExamEvaluateInput
+	var in struct {
+		StudentID        string             `json:"student_id"`
+		Scores           map[string]float64 `json:"scores"`
+		Recommendation   string             `json:"recommendation"`
+		Notes            string             `json:"notes"`
+		ConfirmSignature bool               `json:"confirm_signature"`
+	}
 	if c.Bind().Body(&in) != nil {
 		return fiber.ErrBadRequest
 	}
-	totalScore, gradeLabel, e := in.Validate()
+	check := domain.FinalExamEvaluateInput{StudentID: in.StudentID, Scores: in.Scores, Recommendation: in.Recommendation, Notes: in.Notes}
+	totalScore, gradeLabel, e := check.Validate()
 	if e != nil {
 		return fiber.NewError(422, e.Error())
 	}
@@ -527,7 +551,7 @@ func (s *Server) evaluateFinalExam(c fiber.Ctx) error {
 		role = "EXAMINER_3"
 	default:
 		var isSup bool
-		if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND supervisor_id=$2)`, projectID, actor(c).ID).Scan(&isSup); e != nil {
+		if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND supervisor_id=$2 AND student_id=$3)`, projectID, actor(c).ID, check.StudentID).Scan(&isSup); e != nil {
 			return e
 		}
 		if !isSup {
@@ -535,17 +559,24 @@ func (s *Server) evaluateFinalExam(c fiber.Ctx) error {
 		}
 		role = "SUPERVISOR"
 	}
+	sigKey := ""
+	if in.ConfirmSignature {
+		sigKey, e = signatureKey(c.Context(), tx, actor(c).ID)
+		if e != nil {
+			return e
+		}
+	}
 	var sName, nim string
-	if e = tx.QueryRow(c.Context(), `SELECT student_name,nim FROM capstone_service.project_students WHERE project_id=$1 AND student_id=$2 LIMIT 1`, projectID, in.StudentID).Scan(&sName, &nim); e != nil {
+	if e = tx.QueryRow(c.Context(), `SELECT student_name,nim FROM capstone_service.project_students WHERE project_id=$1 AND student_id=$2 LIMIT 1`, projectID, check.StudentID).Scan(&sName, &nim); e != nil {
 		return e
 	}
-	raw, _ := json.Marshal(in.Scores)
+	raw, _ := json.Marshal(check.Scores)
 	_, e = tx.Exec(c.Context(), `
-		INSERT INTO capstone_service.final_exam_evaluations(id,exam_id,project_id,student_id,student_name,nim,evaluator_id,evaluator_name,evaluator_role,scores,total_score,grade_label,recommendation,notes)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		INSERT INTO capstone_service.final_exam_evaluations(id,exam_id,project_id,student_id,student_name,nim,evaluator_id,evaluator_name,evaluator_role,scores,total_score,grade_label,recommendation,notes,signature_key)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (exam_id,student_id,evaluator_id)
-		DO UPDATE SET evaluator_role=EXCLUDED.evaluator_role,evaluator_name=EXCLUDED.evaluator_name,scores=EXCLUDED.scores,total_score=EXCLUDED.total_score,grade_label=EXCLUDED.grade_label,recommendation=EXCLUDED.recommendation,notes=EXCLUDED.notes,version=capstone_service.final_exam_evaluations.version+1,updated_at=now()`,
-		uuid.NewString(), examID, projectID, in.StudentID, sName, nim, actor(c).ID, actor(c).FullName, role, raw, totalScore, gradeLabel, in.Recommendation, in.Notes)
+		DO UPDATE SET evaluator_role=EXCLUDED.evaluator_role,evaluator_name=EXCLUDED.evaluator_name,scores=EXCLUDED.scores,total_score=EXCLUDED.total_score,grade_label=EXCLUDED.grade_label,recommendation=EXCLUDED.recommendation,notes=EXCLUDED.notes,signature_key=CASE WHEN EXCLUDED.signature_key<>'' THEN EXCLUDED.signature_key ELSE capstone_service.final_exam_evaluations.signature_key END,version=capstone_service.final_exam_evaluations.version+1,updated_at=now()`,
+		uuid.NewString(), examID, projectID, check.StudentID, sName, nim, actor(c).ID, actor(c).FullName, role, raw, totalScore, gradeLabel, check.Recommendation, check.Notes, sigKey)
 	if e != nil {
 		return e
 	}
@@ -620,6 +651,55 @@ func (s *Server) attachFinalExamRevisionApproval(c fiber.Ctx) error {
 	return s.attachStageRevisionApproval(c, "final_exams", "FINAL_EXAM_REVISION_ENDORSED")
 }
 
+func (s *Server) attendFinalExam(c fiber.Ctx) error {
+	if e := require(c, "DOSEN"); e != nil {
+		return e
+	}
+	examID := c.Params("id")
+	if !domain.ValidID(examID) {
+		return fiber.ErrBadRequest
+	}
+	var in struct {
+		Confirm bool `json:"confirm_signature"`
+	}
+	if c.Bind().Body(&in) != nil || !in.Confirm {
+		return fiber.NewError(422, "Konfirmasikan penggunaan tanda tangan pada presensi.")
+	}
+	tx, e := s.DB.Begin(c.Context())
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback(c.Context())
+	var projectID, ex1, ex2, ex3 string
+	if e = tx.QueryRow(c.Context(), `SELECT project_id,examiner_1_id,examiner_2_id,examiner_3_id FROM capstone_service.final_exams WHERE id=$1`, examID).Scan(&projectID, &ex1, &ex2, &ex3); e != nil {
+		return e
+	}
+	u := actor(c)
+	allowed := u.ID == ex1 || u.ID == ex2 || u.ID == ex3
+	if !allowed {
+		if e = tx.QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM capstone_service.project_students WHERE project_id=$1 AND supervisor_id=$2)`, projectID, u.ID).Scan(&allowed); e != nil {
+			return e
+		}
+	}
+	if !allowed {
+		return fiber.ErrForbidden
+	}
+	key, e := signatureKey(c.Context(), tx, u.ID)
+	if e != nil {
+		return e
+	}
+	if _, e = tx.Exec(c.Context(), `INSERT INTO capstone_service.final_exam_attendance(exam_id,lecturer_id,signature_key) VALUES($1,$2,$3) ON CONFLICT(exam_id,lecturer_id) DO UPDATE SET signature_key=excluded.signature_key,confirmed_at=now()`, examID, u.ID, key); e != nil {
+		return e
+	}
+	if e = audit(c.Context(), tx, u, projectID, "FINAL_EXAM_ATTENDED", fiber.Map{"exam_id": examID}); e != nil {
+		return e
+	}
+	if e = tx.Commit(c.Context()); e != nil {
+		return e
+	}
+	return c.SendStatus(204)
+}
+
 func (s *Server) finalExamReport(c fiber.Ctx) error {
 	examID := c.Params("id")
 	if !domain.ValidID(examID) {
@@ -638,7 +718,7 @@ func (s *Server) finalExamReport(c fiber.Ctx) error {
 		return fiber.ErrNotFound
 	}
 	u := actor(c)
-	allowed := u.Has("ADMIN", "KOORDINATOR_TA", "TU") || fe.Examiner1ID == u.ID || fe.Examiner2ID == u.ID || fe.Examiner3ID == u.ID
+	allowed := u.Has("ADMIN", "KOORDINATOR_TA", "TU", "KOPRODI") || fe.Examiner1ID == u.ID || fe.Examiner2ID == u.ID || fe.Examiner3ID == u.ID
 	if !allowed {
 		for _, m := range p.Students {
 			if m.StudentID == u.ID || (m.SupervisorID != nil && *m.SupervisorID == u.ID) {
@@ -650,21 +730,91 @@ func (s *Server) finalExamReport(c fiber.Ctx) error {
 	if !allowed {
 		return fiber.ErrForbidden
 	}
+	kind := c.Query("kind", "minutes")
 	wita := time.FixedZone("WITA", 8*60*60)
-	paras := []string{
-		"Judul Capstone: " + p.Title,
-		"Bidang Minat: " + p.InterestName,
-		"Jadwal Ujian Akhir: " + fe.ScheduledAt.In(wita).Format("02-01-2006 15:04 MST") + " | Tempat/Tautan: " + fe.Location,
-		fmt.Sprintf("Tim Penguji: 1. %s | 2. %s | 3. %s", fe.Examiner1Name, fe.Examiner2Name, fe.Examiner3Name),
-		"Status Ujian Akhir: " + fe.Status,
+	if kind == "attendance" {
+		type panelRow struct{ ID, Name, Role string }
+		signers := []panelRow{
+			{fe.Examiner1ID, fe.Examiner1Name, "Penguji 1"},
+			{fe.Examiner2ID, fe.Examiner2Name, "Penguji 2"},
+			{fe.Examiner3ID, fe.Examiner3Name, "Penguji 3"},
+		}
+		seen := map[string]bool{fe.Examiner1ID: true, fe.Examiner2ID: true, fe.Examiner3ID: true}
+		for _, m := range p.Students {
+			if m.SupervisorID != nil && !seen[*m.SupervisorID] {
+				seen[*m.SupervisorID] = true
+				signers = append(signers, panelRow{*m.SupervisorID, m.SupervisorName, fmt.Sprintf("Pembimbing %d (%s)", m.Slot, m.StudentName)})
+			}
+		}
+		r := reports.ExamReport{
+			Kind:      "Presensi Ujian Akhir Capstone",
+			Reference: fe.ID,
+			Student:   fmt.Sprintf("%d Mahasiswa", len(fe.StudentSummaries)),
+			NIM:       p.InterestName,
+			Title:     p.Title,
+			Date:      fe.ScheduledAt.In(wita).Format("02 January 2006, 15:04"),
+			Location:  fe.Location,
+			Notes:     "Tanda tangan dicantumkan setelah masing-masing dosen mengonfirmasi kehadiran di Ujian Akhir.",
+		}
+		for _, sp := range signers {
+			sig := reports.ExamSignatory{Name: sp.Name, Role: sp.Role}
+			var key string
+			var confirmed time.Time
+			if err := s.DB.QueryRow(c.Context(), `SELECT signature_key,confirmed_at FROM capstone_service.final_exam_attendance WHERE exam_id=$1 AND lecturer_id=$2`, fe.ID, sp.ID).Scan(&key, &confirmed); err == nil && key != "" {
+				if bytesSig, errGet := s.Files.Get(c.Context(), key); errGet == nil {
+					sig.Signature = bytesSig
+					sig.SignedAt = confirmed.In(wita).Format("02/01/2006 15:04 WITA")
+				}
+			}
+			r.Panel = append(r.Panel, sig)
+		}
+		b, e := reports.ProposalExamPDF(r)
+		if e != nil {
+			return e
+		}
+		c.Set("Content-Type", "application/pdf")
+		c.Set("Content-Disposition", `attachment; filename="Presensi_Ujian_Akhir.pdf"`)
+		return c.Send(b)
 	}
-	if fe.OutcomeNote != "" {
-		paras = append(paras, "Catatan: "+fe.OutcomeNote)
-	}
+	summaryLines := []string{}
 	for _, st := range fe.StudentSummaries {
-		paras = append(paras, fmt.Sprintf("Mahasiswa: %s (%s) — Rata-rata Penguji PA II: %.2f (%s) [%d/3 penguji]", st.StudentName, st.NIM, st.AverageScore, st.GradeLabel, st.ExaminerCount))
+		summaryLines = append(summaryLines, fmt.Sprintf("%s (%s): %.2f (%s) [%d/3 penguji]", st.StudentName, st.NIM, st.AverageScore, st.GradeLabel, st.ExaminerCount))
 	}
-	b, e := reports.PDF("Berita Acara Ujian Akhir Capstone", paras)
+	r := reports.ExamReport{
+		Kind:      "Berita Acara Ujian Akhir Capstone",
+		Reference: fe.ID,
+		Student:   fmt.Sprintf("%d Mahasiswa Terdaftar", len(fe.StudentSummaries)),
+		NIM:       p.InterestName,
+		Title:     p.Title,
+		Date:      fe.ScheduledAt.In(wita).Format("02 January 2006, 15:04"),
+		Location:  fe.Location,
+		Result:    "Status Ujian Akhir: " + fe.Status + "\n" + strings.Join(summaryLines, "\n"),
+		Notes:     fe.OutcomeNote,
+	}
+	type evalPanel struct{ ID, Name, Role string }
+	panels := []evalPanel{
+		{fe.Examiner1ID, fe.Examiner1Name, "Penguji 1"},
+		{fe.Examiner2ID, fe.Examiner2Name, "Penguji 2"},
+		{fe.Examiner3ID, fe.Examiner3Name, "Penguji 3"},
+	}
+	for _, pnl := range panels {
+		sig := reports.ExamSignatory{Name: pnl.Name, Role: pnl.Role}
+		var key string
+		var at time.Time
+		if err := s.DB.QueryRow(c.Context(), `SELECT signature_key,updated_at FROM capstone_service.final_exam_evaluations WHERE exam_id=$1 AND evaluator_id=$2 AND signature_key<>'' ORDER BY updated_at DESC LIMIT 1`, fe.ID, pnl.ID).Scan(&key, &at); err == nil {
+			if bytesSig, errGet := s.Files.Get(c.Context(), key); errGet == nil {
+				sig.Signature = bytesSig
+				sig.SignedAt = at.In(wita).Format("02/01/2006 15:04 WITA")
+			}
+		} else if err := s.DB.QueryRow(c.Context(), `SELECT signature_key,confirmed_at FROM capstone_service.final_exam_attendance WHERE exam_id=$1 AND lecturer_id=$2`, fe.ID, pnl.ID).Scan(&key, &at); err == nil && key != "" {
+			if bytesSig, errGet := s.Files.Get(c.Context(), key); errGet == nil {
+				sig.Signature = bytesSig
+				sig.SignedAt = at.In(wita).Format("02/01/2006 15:04 WITA")
+			}
+		}
+		r.Panel = append(r.Panel, sig)
+	}
+	b, e := reports.ProposalExamPDF(r)
 	if e != nil {
 		return e
 	}
